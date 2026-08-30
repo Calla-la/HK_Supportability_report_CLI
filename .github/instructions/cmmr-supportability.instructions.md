@@ -82,3 +82,4 @@ Write values to destination columns `S:V`:
 - Open the source workbook read-only.
 - Save the destination workbook once.
 - Validate all written values after saving.
+- Retry rejected Excel COM calls for at most 10 seconds per call.

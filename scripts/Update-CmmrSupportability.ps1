@@ -31,6 +31,103 @@ function Release-ComObject {
     }
 }
 
+function Register-CmmrExcelComFilter {
+    if (-not ('CmmrOleMessageFilter' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport]
+[Guid("00000016-0000-0000-C000-000000000046")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface ICmmrOleMessageFilter
+{
+    [PreserveSig]
+    int HandleInComingCall(
+        int callType,
+        IntPtr taskCaller,
+        int tickCount,
+        IntPtr interfaceInfo);
+
+    [PreserveSig]
+    int RetryRejectedCall(
+        IntPtr taskCallee,
+        int tickCount,
+        int rejectType);
+
+    [PreserveSig]
+    int MessagePending(
+        IntPtr taskCallee,
+        int tickCount,
+        int pendingType);
+}
+
+public sealed class CmmrOleMessageFilter : ICmmrOleMessageFilter
+{
+    private static CmmrOleMessageFilter current;
+    private static ICmmrOleMessageFilter previous;
+
+    [DllImport("Ole32.dll")]
+    private static extern int CoRegisterMessageFilter(
+        ICmmrOleMessageFilter newFilter,
+        out ICmmrOleMessageFilter oldFilter);
+
+    public static void Register()
+    {
+        if (current != null)
+        {
+            return;
+        }
+        current = new CmmrOleMessageFilter();
+        ICmmrOleMessageFilter oldFilter;
+        CoRegisterMessageFilter(current, out oldFilter);
+        previous = oldFilter;
+    }
+
+    public static void Revoke()
+    {
+        ICmmrOleMessageFilter ignored;
+        CoRegisterMessageFilter(previous, out ignored);
+        previous = null;
+        current = null;
+    }
+
+    public int HandleInComingCall(
+        int callType,
+        IntPtr taskCaller,
+        int tickCount,
+        IntPtr interfaceInfo)
+    {
+        return 0;
+    }
+
+    public int RetryRejectedCall(
+        IntPtr taskCallee,
+        int tickCount,
+        int rejectType)
+    {
+        bool retryable = rejectType == 1 || rejectType == 2;
+        if (retryable && tickCount <= 9750)
+        {
+            return 250;
+        }
+        return -1;
+    }
+
+    public int MessagePending(
+        IntPtr taskCallee,
+        int tickCount,
+        int pendingType)
+    {
+        return 2;
+    }
+}
+'@
+    }
+
+    [CmmrOleMessageFilter]::Register()
+}
+
 function Get-NormalizedKey {
     param(
         [AllowNull()]
@@ -543,8 +640,12 @@ $sourceWorkbook = $null
 $destinationWorkbook = $null
 $excelProcess = $null
 $refreshSucceeded = $false
+$comFilterRegistered = $false
 
 try {
+    Register-CmmrExcelComFilter
+    $comFilterRegistered = $true
+
     $excel = New-Object -ComObject Excel.Application
     $excelProcessId = 0
     $getProcessId = @'
@@ -791,6 +892,10 @@ finally {
     [GC]::WaitForPendingFinalizers()
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
+
+    if ($comFilterRegistered) {
+        [CmmrOleMessageFilter]::Revoke()
+    }
 
     if ($null -ne $excelProcess) {
         try {
