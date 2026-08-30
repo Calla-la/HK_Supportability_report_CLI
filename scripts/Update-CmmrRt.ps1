@@ -564,6 +564,7 @@ function Set-WorksheetContent {
     $firstRow = $null
     $filterRange = $null
     $window = $null
+    $parentWorkbook = $null
 
     try {
         $lastCell = $Worksheet.Cells.Item($rowCount, $columnCount)
@@ -592,8 +593,10 @@ function Set-WorksheetContent {
         $groupColumns.Group() | Out-Null
         $groupColumns.Hidden = $true
 
+        $parentWorkbook = $Worksheet.Parent
+        $parentWorkbook.Activate()
         $Worksheet.Activate()
-        $window = $Application.ActiveWindow
+        $window = $parentWorkbook.Windows.Item(1)
         $window.FreezePanes = $false
         $window.SplitColumn = 0
         $window.SplitRow = 1
@@ -652,6 +655,7 @@ function Assert-Worksheet {
     $dataRange = $null
     $window = $null
     $firstRow = $null
+    $parentWorkbook = $null
 
     try {
         $headerRange = $Worksheet.Range('A1:J1')
@@ -671,8 +675,10 @@ function Assert-Worksheet {
             throw "Worksheet '$($Worksheet.Name)' does not have filters enabled."
         }
 
+        $parentWorkbook = $Worksheet.Parent
+        $parentWorkbook.Activate()
         $Worksheet.Activate()
-        $window = $Application.ActiveWindow
+        $window = $parentWorkbook.Windows.Item(1)
         if (-not [bool]$window.FreezePanes -or [int]$window.SplitRow -ne 1) {
             throw "Worksheet '$($Worksheet.Name)' does not have row 1 frozen."
         }
