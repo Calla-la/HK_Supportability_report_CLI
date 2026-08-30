@@ -1035,7 +1035,7 @@ function Set-SystemConfirmationContent {
 
         for ($rowIndex = 2; $rowIndex -le $rowCount; $rowIndex++) {
             if ($scheduleIsZero[$rowIndex]) {
-                $rowRange = $Worksheet.Range("A$rowIndex:BX$rowIndex")
+                $rowRange = $Worksheet.Range("A${rowIndex}:BX${rowIndex}")
                 try {
                     $rowRange.Interior.Color = $expectedColors[$rowIndex]
                 }
@@ -1134,7 +1134,7 @@ function Assert-SystemConfirmationContent {
             }
 
             if ($Expected.ScheduleIsZero[$rowIndex]) {
-                $rowRange = $Worksheet.Range("A$rowIndex:BX$rowIndex")
+                $rowRange = $Worksheet.Range("A${rowIndex}:BX${rowIndex}")
                 try {
                     if ([int]$rowRange.Interior.Color -ne
                         $Expected.ExpectedColors[$rowIndex]) {
