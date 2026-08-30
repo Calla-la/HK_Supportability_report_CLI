@@ -25,6 +25,151 @@ function Release-ComObject {
     }
 }
 
+function Register-RetailExcelComFilter {
+    if (-not ('RetailOleMessageFilter' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport]
+[Guid("00000016-0000-0000-C000-000000000046")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IRetailOleMessageFilter
+{
+    [PreserveSig]
+    int HandleInComingCall(
+        int callType,
+        IntPtr taskCaller,
+        int tickCount,
+        IntPtr interfaceInfo);
+
+    [PreserveSig]
+    int RetryRejectedCall(
+        IntPtr taskCallee,
+        int tickCount,
+        int rejectType);
+
+    [PreserveSig]
+    int MessagePending(
+        IntPtr taskCallee,
+        int tickCount,
+        int pendingType);
+}
+
+public sealed class RetailOleMessageFilter : IRetailOleMessageFilter
+{
+    private static RetailOleMessageFilter current;
+    private static IRetailOleMessageFilter previous;
+
+    [DllImport("Ole32.dll")]
+    private static extern int CoRegisterMessageFilter(
+        IRetailOleMessageFilter newFilter,
+        out IRetailOleMessageFilter oldFilter);
+
+    public static void Register()
+    {
+        if (current != null)
+        {
+            return;
+        }
+
+        current = new RetailOleMessageFilter();
+        IRetailOleMessageFilter oldFilter;
+        CoRegisterMessageFilter(current, out oldFilter);
+        previous = oldFilter;
+    }
+
+    public static void Revoke()
+    {
+        IRetailOleMessageFilter ignored;
+        CoRegisterMessageFilter(previous, out ignored);
+        previous = null;
+        current = null;
+    }
+
+    public int HandleInComingCall(
+        int callType,
+        IntPtr taskCaller,
+        int tickCount,
+        IntPtr interfaceInfo)
+    {
+        return 0;
+    }
+
+    public int RetryRejectedCall(
+        IntPtr taskCallee,
+        int tickCount,
+        int rejectType)
+    {
+        bool retryable = rejectType == 1 || rejectType == 2;
+        if (retryable && tickCount <= 9750)
+        {
+            return 250;
+        }
+
+        return -1;
+    }
+
+    public int MessagePending(
+        IntPtr taskCallee,
+        int tickCount,
+        int pendingType)
+    {
+        return 2;
+    }
+}
+'@
+    }
+
+    [RetailOleMessageFilter]::Register()
+}
+
+function Invoke-ExcelComRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Operation,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context,
+
+        [int]$TimeoutSeconds = 10
+    )
+
+    $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastComException = $null
+    while ($true) {
+        if ($null -ne $lastComException -and
+            [datetime]::UtcNow -ge $deadline) {
+            $hresultText = '0x{0:X8}' -f
+                ($lastComException.HResult -band 0xFFFFFFFFL)
+            throw "Excel COM operation '$Context' failed after $TimeoutSeconds seconds ($hresultText): $($lastComException.Message)"
+        }
+
+        try {
+            return & $Operation
+        }
+        catch [Runtime.InteropServices.COMException] {
+            $lastComException = $_.Exception
+            $hresult = $_.Exception.HResult -band 0xFFFFFFFFL
+            $retryable = $hresult -in @(
+                0x80010001L,
+                0x8001010AL,
+                0x800AC472L
+            )
+            if (-not $retryable) {
+                throw
+            }
+            $remainingMilliseconds =
+                ($deadline - [datetime]::UtcNow).TotalMilliseconds
+            if ($remainingMilliseconds -le 250) {
+                $hresultText = '0x{0:X8}' -f $hresult
+                throw "Excel COM operation '$Context' failed after $TimeoutSeconds seconds ($hresultText): $($_.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
 function Get-Key {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value) { return '' }
@@ -380,9 +525,16 @@ function Set-CellValue {
         [Parameter(Mandatory = $true)][int]$Column,
         [AllowNull()][object]$Value
     )
-    $cell = $Worksheet.Cells.Item($Row, $Column)
-    try { $cell.Value2 = $Value }
-    finally { Release-ComObject -ComObject $cell }
+    Invoke-ExcelComRetry -Context "write row $Row, column $Column" -Operation {
+        $cell = $null
+        try {
+            $cell = $Worksheet.Cells.Item($Row, $Column)
+            $cell.Value2 = $Value
+        }
+        finally {
+            Release-ComObject -ComObject $cell
+        }
+    }
 }
 
 function Assert-CellValue {
@@ -392,16 +544,21 @@ function Assert-CellValue {
         [Parameter(Mandatory = $true)][int]$Column,
         [Parameter(Mandatory = $true)][double]$Expected
     )
-    $cell = $Worksheet.Cells.Item($Row, $Column)
-    try {
-        $actual = ConvertTo-Number `
-            -Value $cell.Value2 `
-            -Context "validation row $Row, column $Column"
-        if ([math]::Abs($actual - $Expected) -gt 0.000001) {
-            throw "Validation failed at row $Row, column $Column. Expected $Expected but found $actual."
+    Invoke-ExcelComRetry -Context "validate row $Row, column $Column" -Operation {
+        $cell = $null
+        try {
+            $cell = $Worksheet.Cells.Item($Row, $Column)
+            $actual = ConvertTo-Number `
+                -Value $cell.Value2 `
+                -Context "validation row $Row, column $Column"
+            if ([math]::Abs($actual - $Expected) -gt 0.000001) {
+                throw "Validation failed at row $Row, column $Column. Expected $Expected but found $actual."
+            }
+        }
+        finally {
+            Release-ComObject -ComObject $cell
         }
     }
-    finally { Release-ComObject -ComObject $cell }
 }
 
 foreach ($path in @($SourceWorkbookPath, $DestinationWorkbookPath)) {
@@ -417,8 +574,12 @@ $sourceWorkbook = $null
 $destinationWorkbook = $null
 $excelProcess = $null
 $refreshSucceeded = $false
+$comFilterRegistered = $false
 
 try {
+    Register-RetailExcelComFilter
+    $comFilterRegistered = $true
+
     if (-not ('RetailExcelProcessResolver' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
@@ -544,20 +705,30 @@ public static class RetailExcelProcessResolver
     }
 
     for ($index = 0; $index -lt 7; $index++) {
-        $header = $targetSheet.Cells.Item(3, 47 + $index)
-        try {
-            if ($index -lt $weeklyOpenOrder.Future.Count) {
-                $header.Value2 = $weeklyOpenOrder.Future[$index].Friday.ToOADate()
-                $header.NumberFormat = 'mm/dd'
+        Invoke-ExcelComRetry `
+            -Context "write future header column $(47 + $index)" `
+            -Operation {
+                $header = $null
+                try {
+                    $header = $targetSheet.Cells.Item(3, 47 + $index)
+                    if ($index -lt $weeklyOpenOrder.Future.Count) {
+                        $header.Value2 =
+                            $weeklyOpenOrder.Future[$index].Friday.ToOADate()
+                        $header.NumberFormat = 'mm/dd'
+                    }
+                    else {
+                        $header.ClearContents()
+                    }
+                }
+                finally {
+                    Release-ComObject -ComObject $header
+                }
             }
-            else {
-                $header.ClearContents()
-            }
-        }
-        finally { Release-ComObject -ComObject $header }
     }
 
-    $destinationWorkbook.Save()
+    Invoke-ExcelComRetry -Context 'save Retail destination workbook' -Operation {
+        $destinationWorkbook.Save()
+    }
 
     for ($row = $targetStartRow; $row -le $targetLastRow; $row++) {
         $productId = Get-Key -Value $productValues[($row - 3), 1]
@@ -606,25 +777,34 @@ public static class RetailExcelProcessResolver
     }
 
     for ($index = 0; $index -lt 7; $index++) {
-        $header = $targetSheet.Cells.Item(3, 47 + $index)
-        try {
-            if ($index -lt $weeklyOpenOrder.Future.Count) {
-                $expectedDate = $weeklyOpenOrder.Future[$index].Friday
-                $actualDate = ConvertTo-Date `
-                    -Value $header.Value2 `
-                    -Context "future weekly header column $(47 + $index)"
-                if ($actualDate -ne $expectedDate.Date) {
-                    throw "Future weekly header column $(47 + $index) has an incorrect date."
+        Invoke-ExcelComRetry `
+            -Context "validate future header column $(47 + $index)" `
+            -Operation {
+                $header = $null
+                try {
+                    $header = $targetSheet.Cells.Item(3, 47 + $index)
+                    if ($index -lt $weeklyOpenOrder.Future.Count) {
+                        $expectedDate = $weeklyOpenOrder.Future[$index].Friday
+                        $actualDate = ConvertTo-Date `
+                            -Value $header.Value2 `
+                            -Context "future weekly header column $(47 + $index)"
+                        if ($actualDate -ne $expectedDate.Date) {
+                            throw "Future weekly header column $(47 + $index) has an incorrect date."
+                        }
+                        if ([string]$header.NumberFormat -ne 'mm/dd') {
+                            throw "Future weekly header column $(47 + $index) does not use mm/dd format."
+                        }
+                    }
+                    elseif (-not [string]::IsNullOrEmpty(
+                        [string]$header.Value2
+                    )) {
+                        throw "Unused future weekly header column $(47 + $index) is not blank."
+                    }
                 }
-                if ([string]$header.NumberFormat -ne 'mm/dd') {
-                    throw "Future weekly header column $(47 + $index) does not use mm/dd format."
+                finally {
+                    Release-ComObject -ComObject $header
                 }
             }
-            elseif (-not [string]::IsNullOrEmpty([string]$header.Value2)) {
-                throw "Unused future weekly header column $(47 + $index) is not blank."
-            }
-        }
-        finally { Release-ComObject -ComObject $header }
     }
 
     $refreshSucceeded = $true
@@ -652,6 +832,9 @@ finally {
     [GC]::WaitForPendingFinalizers()
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
+    if ($comFilterRegistered) {
+        [RetailOleMessageFilter]::Revoke()
+    }
     if ($null -ne $excelProcess) {
         try {
             if (-not $excelProcess.HasExited -and

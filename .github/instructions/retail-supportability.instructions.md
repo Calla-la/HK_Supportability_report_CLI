@@ -75,3 +75,5 @@ Match `Retail INV` Material to destination Product ID:
   charts, shapes, links, names, or workbook structure.
 - Open the source workbook read-only, save the destination once, and validate
   every written value after saving.
+- Retry transient rejected Excel COM operations for at most 10 seconds, then
+  report the exact operation that failed.
