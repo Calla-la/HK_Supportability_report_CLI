@@ -1092,16 +1092,36 @@ try {
 }
 finally {
     if ($null -ne $rtOorWorkbook) {
-        $rtOorWorkbook.Close($false)
+        try {
+            $rtOorWorkbook.Close($false)
+        }
+        catch {
+            Write-Warning "Failed to close RT ALLRG OOR.xlsx: $($_.Exception.Message)"
+        }
     }
     if ($null -ne $cmmrOorWorkbook) {
-        $cmmrOorWorkbook.Close($false)
+        try {
+            $cmmrOorWorkbook.Close($false)
+        }
+        catch {
+            Write-Warning "Failed to close CMMR allregion OOR.xlsx: $($_.Exception.Message)"
+        }
     }
     if ($null -ne $workbook) {
-        $workbook.Close($false)
+        try {
+            $workbook.Close($false)
+        }
+        catch {
+            Write-Warning "Failed to close the inventory workbook: $($_.Exception.Message)"
+        }
     }
     if ($null -ne $excel) {
-        $excel.Quit()
+        try {
+            $excel.Quit()
+        }
+        catch {
+            Write-Warning "Failed to quit Excel cleanly: $($_.Exception.Message)"
+        }
     }
 
     foreach ($comObject in @(
