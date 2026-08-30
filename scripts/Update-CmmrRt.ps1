@@ -1027,10 +1027,14 @@ try {
     $cmmrOorWorksheet = $cmmrOorWorkbook.Worksheets.Item(1)
     $rtOorWorksheet = $rtOorWorkbook.Worksheets.Item(1)
 
+    Remove-Worksheet -Workbook $workbook -WorksheetName '__CMMR_INV_TEMP__'
+    Remove-Worksheet -Workbook $workbook -WorksheetName '__RETAIL_INV_TEMP__'
+
+    $temporarySuffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
     $cmmrWorksheet = $workbook.Worksheets.Add()
-    $cmmrWorksheet.Name = '__CMMR_INV_TEMP__'
+    $cmmrWorksheet.Name = "__CMMR_$temporarySuffix"
     $retailWorksheet = $workbook.Worksheets.Add()
-    $retailWorksheet.Name = '__RETAIL_INV_TEMP__'
+    $retailWorksheet.Name = "__RETAIL_$temporarySuffix"
 
     Remove-Worksheet -Workbook $workbook -WorksheetName 'CMMR INV'
     Remove-Worksheet -Workbook $workbook -WorksheetName 'Retail INV'
