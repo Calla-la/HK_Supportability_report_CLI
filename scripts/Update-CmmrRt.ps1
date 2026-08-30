@@ -327,6 +327,33 @@ function Release-ComObject {
     }
 }
 
+function Save-WorkbookWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Workbook,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkbookName,
+
+        [int]$MaximumAttempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        try {
+            $Workbook.Save()
+            return
+        }
+        catch [System.Runtime.InteropServices.COMException] {
+            $hresult = '0x{0:X8}' -f ($_.Exception.HResult -band 0xFFFFFFFFL)
+            if ($attempt -eq $MaximumAttempts) {
+                throw "Failed to save '$WorkbookName' after $MaximumAttempts attempts. Excel COM error $hresult`: $($_.Exception.Message)"
+            }
+
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+}
+
 function Remove-Worksheet {
     param(
         [Parameter(Mandatory = $true)]
@@ -1067,9 +1094,15 @@ try {
         -LightBlue $lightBlue
 
     $excel.CalculateFull()
-    $workbook.Save()
-    $cmmrOorWorkbook.Save()
-    $rtOorWorkbook.Save()
+    Save-WorkbookWithRetry `
+        -Workbook $workbook `
+        -WorkbookName (Split-Path -Leaf $resolvedWorkbookPath)
+    Save-WorkbookWithRetry `
+        -Workbook $cmmrOorWorkbook `
+        -WorkbookName (Split-Path -Leaf $cmmrOorPath)
+    Save-WorkbookWithRetry `
+        -Workbook $rtOorWorkbook `
+        -WorkbookName (Split-Path -Leaf $rtOorPath)
 
     Assert-WorksheetNameCount -Workbook $workbook -WorksheetName 'CMMR INV'
     Assert-WorksheetNameCount -Workbook $workbook -WorksheetName 'Retail INV'

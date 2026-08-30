@@ -31,7 +31,9 @@ When the user says "Run the CMMR-RT inventory and system confirmation update":
 - Perform one final validation after saving.
 - Avoid unnecessary previews, repeated reads, and intermediate checks.
 - Open all three target workbooks in the same Excel COM instance.
-- Save each target workbook once.
+- Complete one successful save for each target workbook.
+- Retry only Excel COM save failures, up to three attempts per workbook, and
+  report the exact workbook name if all attempts fail.
 
 ## Process CMMR_INV_RAW_DATA.XLS
 
