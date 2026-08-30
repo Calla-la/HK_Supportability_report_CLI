@@ -1,12 +1,15 @@
-# CMMR-RT Standard Update
+# CMMR-RT Inventory and System Confirmation Update
 
-When the user says "Run the CMMR-RT Standard Update":
+When the user says "Run the CMMR-RT inventory and system confirmation update":
 
 1. Use the workbook path provided by the user.
 2. Use `scripts/Update-CmmrRt.ps1` as the authoritative implementation.
 3. The two source files are located in the same directory as the target workbook:
    - `CMMR_INV_RAW_DATA.XLS`
    - `RETAIL_INV_RAW_DATA.xls`
+   The two system-confirmation workbooks are also located in that directory:
+   - `CMMR allregion OOR.xlsx`
+   - `RT ALLRG OOR.xlsx`
 4. Run only:
 
    `powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrRt.ps1 -WorkbookPath "<provided-path>"`
@@ -27,6 +30,8 @@ When the user says "Run the CMMR-RT Standard Update":
 - Save the workbook once.
 - Perform one final validation after saving.
 - Avoid unnecessary previews, repeated reads, and intermediate checks.
+- Open all three target workbooks in the same Excel COM instance.
+- Save each target workbook once.
 
 ## Process CMMR_INV_RAW_DATA.XLS
 
@@ -107,3 +112,42 @@ Confirm all of the following:
 - `CMMR INV` has a light-green, bold, black header.
 - `Retail INV` has a light-blue, bold, black header.
 - Header text wrapping is enabled.
+
+## System confirmation update
+
+Apply the following rules to `CMMR allregion OOR.xlsx` and
+`RT ALLRG OOR.xlsx`:
+
+1. Update the first worksheet.
+2. Name column `BX` as `Date to release`.
+3. In the `Plant` column, fill each blank cell with the value from the cell
+   above.
+4. Trim Plant values and convert the entire Plant column to numeric values so
+   PivotTables do not retain separate text and numeric items for the same
+   Plant.
+5. Group rows by the same `Order Nbr` and `SKU`.
+6. If a group contains only `Sched Line # = 0`, retain those rows for the
+   Date-to-release calculation.
+7. If a group contains both zero and non-zero schedule lines, clear
+   `Date to release` for rows where `Sched Line # = 0` and retain non-zero
+   rows.
+8. For retained rows:
+   - If `Delivered Qty` is not zero, enter `Delivered`.
+   - If `Delivered Qty` is zero and `Material Avail.Date` is blank or zero,
+     enter `TBD`.
+   - Otherwise, use `=BH2+MOD(5-WEEKDAY(BH2,2),7)`, adjusted for each row.
+9. For rows where `Sched Line # = 0`, highlight columns `A:BX` light green
+   when `ShipTo Ctry` is `HK`, and light blue otherwise.
+10. Refresh PivotTable caches after normalizing Plant values.
+
+## System confirmation validation
+
+Confirm all of the following after saving:
+
+- Both OOR workbooks have `Date to release` in `BX1`.
+- Every populated Plant value is numeric and blank Plant cells were filled
+  from above.
+- Mixed schedule-line groups have blank Date-to-release values on their zero
+  schedule rows.
+- Retained rows contain `Delivered`, `TBD`, or the expected row formula.
+- Zero schedule rows use the expected HK/non-HK highlight color.

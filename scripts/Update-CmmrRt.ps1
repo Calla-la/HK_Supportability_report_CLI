@@ -590,6 +590,382 @@ function Assert-WorksheetNameCount {
     }
 }
 
+function Get-CellText {
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($null -eq $Value) {
+        return ''
+    }
+
+    return ([string]$Value).Trim()
+}
+
+function ConvertFrom-WorksheetNumber {
+    param(
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return [double]0
+    }
+
+    if ($Value -is [byte] -or
+        $Value -is [int16] -or
+        $Value -is [int32] -or
+        $Value -is [int64] -or
+        $Value -is [single] -or
+        $Value -is [double] -or
+        $Value -is [decimal]) {
+        return [double]$Value
+    }
+
+    $normalized = ([string]$Value).Trim().Replace([char]0x00A0, ' ').Replace(' ', '')
+    $number = [double]0
+    $styles = [System.Globalization.NumberStyles]::Float -bor
+        [System.Globalization.NumberStyles]::AllowThousands
+    if (-not [double]::TryParse(
+        $normalized,
+        $styles,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$number
+    )) {
+        throw "Expected a numeric value for $Context, but found '$Value'."
+    }
+
+    return $number
+}
+
+function Get-OorHeaderIndexes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [object[,]]$Values,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkbookName
+    )
+
+    $headers = [System.Collections.Hashtable]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    for ($columnIndex = 1; $columnIndex -le $Values.GetLength(1); $columnIndex++) {
+        $header = Get-CellText -Value $Values[1, $columnIndex]
+        if (-not [string]::IsNullOrWhiteSpace($header)) {
+            $headers[$header] = $columnIndex
+        }
+    }
+
+    foreach ($requiredHeader in @(
+        'Order Nbr',
+        'SKU',
+        'Sched Line #',
+        'Plant',
+        'Delivered Qty',
+        'Material Avail.Date',
+        'ShipTo Ctry'
+    )) {
+        if (-not $headers.ContainsKey($requiredHeader)) {
+            throw "Required column '$requiredHeader' was not found in '$WorkbookName'."
+        }
+    }
+
+    return ,$headers
+}
+
+function Set-SystemConfirmationContent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Workbook,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Worksheet,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkbookName,
+
+        [Parameter(Mandatory = $true)]
+        [int]$LightGreen,
+
+        [Parameter(Mandatory = $true)]
+        [int]$LightBlue
+    )
+
+    $usedRange = $null
+    $sourceRange = $null
+    $plantRange = $null
+    $plantStart = $null
+    $plantEnd = $null
+    $releaseRange = $null
+    $releaseHeader = $null
+    $pivotCaches = $null
+
+    try {
+        $usedRange = $Worksheet.UsedRange
+        $rowCount = [int]$usedRange.Rows.Count
+        if ($rowCount -lt 2) {
+            throw "Workbook '$WorkbookName' does not contain any data rows."
+        }
+
+        $sourceRange = $Worksheet.Range("A1:BX$rowCount")
+        $values = $sourceRange.Value2
+        $headerIndexes = Get-OorHeaderIndexes -Values $values -WorkbookName $WorkbookName
+        $groups = [System.Collections.Hashtable]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+        $scheduleIsZero = New-Object 'bool[]' ($rowCount + 1)
+
+        for ($rowIndex = 2; $rowIndex -le $rowCount; $rowIndex++) {
+            $orderNumber = Get-CellText -Value $values[$rowIndex, $headerIndexes['Order Nbr']]
+            $sku = Get-CellText -Value $values[$rowIndex, $headerIndexes['SKU']]
+            if ([string]::IsNullOrWhiteSpace($orderNumber) -and
+                [string]::IsNullOrWhiteSpace($sku)) {
+                continue
+            }
+
+            $scheduleLine = ConvertFrom-WorksheetNumber `
+                -Value $values[$rowIndex, $headerIndexes['Sched Line #']] `
+                -Context "'Sched Line #' at row $rowIndex in '$WorkbookName'"
+            $isZero = [math]::Abs($scheduleLine) -lt 0.000001
+            $scheduleIsZero[$rowIndex] = $isZero
+            $groupKey = $orderNumber + [char]0x001F + $sku
+
+            if (-not $groups.ContainsKey($groupKey)) {
+                $groups[$groupKey] = [pscustomobject]@{
+                    HasZero = $false
+                    HasNonZero = $false
+                }
+            }
+
+            if ($isZero) {
+                $groups[$groupKey].HasZero = $true
+            }
+            else {
+                $groups[$groupKey].HasNonZero = $true
+            }
+        }
+
+        $plantValues = New-Object 'object[,]' ($rowCount - 1), 1
+        $releaseValues = New-Object 'object[,]' ($rowCount - 1), 1
+        $expectedColors = New-Object 'int[]' ($rowCount + 1)
+        $previousPlant = $null
+
+        for ($rowIndex = 2; $rowIndex -le $rowCount; $rowIndex++) {
+            $outputIndex = $rowIndex - 2
+            $plantValue = $values[$rowIndex, $headerIndexes['Plant']]
+            if ($null -eq $plantValue -or [string]::IsNullOrWhiteSpace([string]$plantValue)) {
+                if ($null -eq $previousPlant) {
+                    throw "The first Plant value is blank at row $rowIndex in '$WorkbookName'."
+                }
+                $plantNumber = $previousPlant
+            }
+            else {
+                $plantNumber = ConvertFrom-WorksheetNumber `
+                    -Value $plantValue `
+                    -Context "'Plant' at row $rowIndex in '$WorkbookName'"
+                $previousPlant = $plantNumber
+            }
+            $plantValues[$outputIndex, 0] = [double]$plantNumber
+
+            $orderNumber = Get-CellText -Value $values[$rowIndex, $headerIndexes['Order Nbr']]
+            $sku = Get-CellText -Value $values[$rowIndex, $headerIndexes['SKU']]
+            $groupKey = $orderNumber + [char]0x001F + $sku
+            $clearReleaseValue = $false
+            if ($groups.ContainsKey($groupKey)) {
+                $group = $groups[$groupKey]
+                $clearReleaseValue = $scheduleIsZero[$rowIndex] -and
+                    $group.HasZero -and
+                    $group.HasNonZero
+            }
+
+            if ($clearReleaseValue -or
+                ([string]::IsNullOrWhiteSpace($orderNumber) -and
+                [string]::IsNullOrWhiteSpace($sku))) {
+                $releaseValues[$outputIndex, 0] = ''
+            }
+            else {
+                $deliveredQuantity = ConvertFrom-WorksheetNumber `
+                    -Value $values[$rowIndex, $headerIndexes['Delivered Qty']] `
+                    -Context "'Delivered Qty' at row $rowIndex in '$WorkbookName'"
+                $materialAvailableValue = $values[
+                    $rowIndex,
+                    $headerIndexes['Material Avail.Date']
+                ]
+
+                if ([math]::Abs($deliveredQuantity) -ge 0.000001) {
+                    $releaseValues[$outputIndex, 0] = 'Delivered'
+                }
+                elseif ($null -eq $materialAvailableValue -or
+                    [string]::IsNullOrWhiteSpace([string]$materialAvailableValue) -or
+                    [math]::Abs((ConvertFrom-WorksheetNumber `
+                        -Value $materialAvailableValue `
+                        -Context "'Material Avail.Date' at row $rowIndex in '$WorkbookName'")) `
+                        -lt 0.000001) {
+                    $releaseValues[$outputIndex, 0] = 'TBD'
+                }
+                else {
+                    $releaseValues[$outputIndex, 0] =
+                        "=BH$rowIndex+MOD(5-WEEKDAY(BH$rowIndex,2),7)"
+                }
+            }
+
+            if ($scheduleIsZero[$rowIndex]) {
+                $shipToCountry = Get-CellText `
+                    -Value $values[$rowIndex, $headerIndexes['ShipTo Ctry']]
+                if ($shipToCountry -eq 'HK') {
+                    $expectedColors[$rowIndex] = $LightGreen
+                }
+                else {
+                    $expectedColors[$rowIndex] = $LightBlue
+                }
+            }
+        }
+
+        $releaseHeader = $Worksheet.Cells.Item(1, 76)
+        $releaseHeader.Value2 = 'Date to release'
+
+        $plantStart = $Worksheet.Cells.Item(2, $headerIndexes['Plant'])
+        $plantEnd = $Worksheet.Cells.Item($rowCount, $headerIndexes['Plant'])
+        $plantRange = $Worksheet.Range($plantStart, $plantEnd)
+        $plantRange.NumberFormat = '0'
+        $plantRange.Value2 = $plantValues
+
+        $releaseRange = $Worksheet.Range("BX2:BX$rowCount")
+        $releaseRange.Formula = $releaseValues
+
+        for ($rowIndex = 2; $rowIndex -le $rowCount; $rowIndex++) {
+            if ($scheduleIsZero[$rowIndex]) {
+                $rowRange = $Worksheet.Range("A$rowIndex:BX$rowIndex")
+                try {
+                    $rowRange.Interior.Color = $expectedColors[$rowIndex]
+                }
+                finally {
+                    Release-ComObject -ComObject $rowRange
+                }
+            }
+        }
+
+        $pivotCaches = $Workbook.PivotCaches()
+        for ($cacheIndex = 1; $cacheIndex -le $pivotCaches.Count; $cacheIndex++) {
+            $pivotCache = $pivotCaches.Item($cacheIndex)
+            try {
+                $pivotCache.MissingItemsLimit = 0
+                [void]$pivotCache.Refresh()
+            }
+            finally {
+                Release-ComObject -ComObject $pivotCache
+            }
+        }
+
+        return [pscustomobject]@{
+            RowCount = $rowCount
+            PlantColumnIndex = $headerIndexes['Plant']
+            PlantValues = $plantValues
+            ReleaseValues = $releaseValues
+            ScheduleIsZero = $scheduleIsZero
+            ExpectedColors = $expectedColors
+        }
+    }
+    finally {
+        foreach ($comObject in @(
+            $pivotCaches,
+            $releaseHeader,
+            $releaseRange,
+            $plantRange,
+            $plantEnd,
+            $plantStart,
+            $sourceRange,
+            $usedRange
+        )) {
+            Release-ComObject -ComObject $comObject
+        }
+    }
+}
+
+function Assert-SystemConfirmationContent {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Worksheet,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkbookName,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Expected
+    )
+
+    $releaseHeader = $null
+    $plantRange = $null
+    $plantStart = $null
+    $plantEnd = $null
+    $releaseRange = $null
+
+    try {
+        $releaseHeader = $Worksheet.Cells.Item(1, 76)
+        if ([string]$releaseHeader.Value2 -ne 'Date to release') {
+            throw "Workbook '$WorkbookName' does not have the expected BX header."
+        }
+
+        $plantStart = $Worksheet.Cells.Item(2, $Expected.PlantColumnIndex)
+        $plantEnd = $Worksheet.Cells.Item(
+            $Expected.RowCount,
+            $Expected.PlantColumnIndex
+        )
+        $plantRange = $Worksheet.Range($plantStart, $plantEnd)
+        $actualPlants = $plantRange.Value2
+        $releaseRange = $Worksheet.Range("BX2:BX$($Expected.RowCount)")
+        $actualReleaseValues = $releaseRange.Formula
+
+        for ($rowIndex = 2; $rowIndex -le $Expected.RowCount; $rowIndex++) {
+            $arrayIndex = $rowIndex - 1
+            $actualPlant = $actualPlants[$arrayIndex, 1]
+            if ($actualPlant -is [string]) {
+                throw "Plant at row $rowIndex in '$WorkbookName' is still stored as text."
+            }
+            Assert-NearlyEqual `
+                -Actual ([double]$actualPlant) `
+                -Expected ([double]$Expected.PlantValues[($rowIndex - 2), 0]) `
+                -Message "Plant at row $rowIndex in '$WorkbookName' is incorrect."
+
+            $expectedReleaseValue = [string]$Expected.ReleaseValues[($rowIndex - 2), 0]
+            $actualReleaseValue = [string]$actualReleaseValues[$arrayIndex, 1]
+            if ($actualReleaseValue -ne $expectedReleaseValue) {
+                throw "Date to release at row $rowIndex in '$WorkbookName' is incorrect."
+            }
+
+            if ($Expected.ScheduleIsZero[$rowIndex]) {
+                $rowRange = $Worksheet.Range("A$rowIndex:BX$rowIndex")
+                try {
+                    if ([int]$rowRange.Interior.Color -ne
+                        $Expected.ExpectedColors[$rowIndex]) {
+                        throw "Row $rowIndex in '$WorkbookName' has the wrong highlight color."
+                    }
+                }
+                finally {
+                    Release-ComObject -ComObject $rowRange
+                }
+            }
+        }
+    }
+    finally {
+        foreach ($comObject in @(
+            $releaseRange,
+            $plantRange,
+            $plantEnd,
+            $plantStart,
+            $releaseHeader
+        )) {
+            Release-ComObject -ComObject $comObject
+        }
+    }
+}
+
 if (-not (Test-Path -LiteralPath $WorkbookPath -PathType Leaf)) {
     throw "Workbook not found: $WorkbookPath"
 }
@@ -598,8 +974,15 @@ $resolvedWorkbookPath = (Resolve-Path -LiteralPath $WorkbookPath).Path
 $sourceDirectory = Split-Path -Parent $resolvedWorkbookPath
 $cmmrSourcePath = Join-Path $sourceDirectory 'CMMR_INV_RAW_DATA.XLS'
 $retailSourcePath = Join-Path $sourceDirectory 'RETAIL_INV_RAW_DATA.xls'
+$cmmrOorPath = Join-Path $sourceDirectory 'CMMR allregion OOR.xlsx'
+$rtOorPath = Join-Path $sourceDirectory 'RT ALLRG OOR.xlsx'
 
-foreach ($sourcePath in @($cmmrSourcePath, $retailSourcePath)) {
+foreach ($sourcePath in @(
+    $cmmrSourcePath,
+    $retailSourcePath,
+    $cmmrOorPath,
+    $rtOorPath
+)) {
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
         throw "Source file not found: $sourcePath"
     }
@@ -616,6 +999,10 @@ $excel = $null
 $workbook = $null
 $cmmrWorksheet = $null
 $retailWorksheet = $null
+$cmmrOorWorkbook = $null
+$cmmrOorWorksheet = $null
+$rtOorWorkbook = $null
+$rtOorWorksheet = $null
 
 try {
     $excel = New-Object -ComObject Excel.Application
@@ -629,6 +1016,16 @@ try {
     if ([bool]$workbook.ReadOnly) {
         throw "Workbook opened as read-only and cannot be updated: $resolvedWorkbookPath"
     }
+    $cmmrOorWorkbook = $excel.Workbooks.Open($cmmrOorPath, 0, $false)
+    if ([bool]$cmmrOorWorkbook.ReadOnly) {
+        throw "Workbook opened as read-only and cannot be updated: $cmmrOorPath"
+    }
+    $rtOorWorkbook = $excel.Workbooks.Open($rtOorPath, 0, $false)
+    if ([bool]$rtOorWorkbook.ReadOnly) {
+        throw "Workbook opened as read-only and cannot be updated: $rtOorPath"
+    }
+    $cmmrOorWorksheet = $cmmrOorWorkbook.Worksheets.Item(1)
+    $rtOorWorksheet = $rtOorWorkbook.Worksheets.Item(1)
 
     $cmmrWorksheet = $workbook.Worksheets.Add()
     $cmmrWorksheet.Name = '__CMMR_INV_TEMP__'
@@ -652,7 +1049,23 @@ try {
         -Values $retailValues `
         -HeaderColor $lightBlue
 
+    $cmmrOorExpected = Set-SystemConfirmationContent `
+        -Workbook $cmmrOorWorkbook `
+        -Worksheet $cmmrOorWorksheet `
+        -WorkbookName 'CMMR allregion OOR.xlsx' `
+        -LightGreen $lightGreen `
+        -LightBlue $lightBlue
+    $rtOorExpected = Set-SystemConfirmationContent `
+        -Workbook $rtOorWorkbook `
+        -Worksheet $rtOorWorksheet `
+        -WorkbookName 'RT ALLRG OOR.xlsx' `
+        -LightGreen $lightGreen `
+        -LightBlue $lightBlue
+
+    $excel.CalculateFull()
     $workbook.Save()
+    $cmmrOorWorkbook.Save()
+    $rtOorWorkbook.Save()
 
     Assert-WorksheetNameCount -Workbook $workbook -WorksheetName 'CMMR INV'
     Assert-WorksheetNameCount -Workbook $workbook -WorksheetName 'Retail INV'
@@ -666,10 +1079,24 @@ try {
         -Worksheet $retailWorksheet `
         -DataRowCount $retailRows.Count `
         -ExpectedHeaderColor $lightBlue
+    Assert-SystemConfirmationContent `
+        -Worksheet $cmmrOorWorksheet `
+        -WorkbookName 'CMMR allregion OOR.xlsx' `
+        -Expected $cmmrOorExpected
+    Assert-SystemConfirmationContent `
+        -Worksheet $rtOorWorksheet `
+        -WorkbookName 'RT ALLRG OOR.xlsx' `
+        -Expected $rtOorExpected
 
-    Write-Host "CMMR-RT update and final validation succeeded: $resolvedWorkbookPath"
+    Write-Host 'CMMR-RT inventory and system confirmation update succeeded.'
 }
 finally {
+    if ($null -ne $rtOorWorkbook) {
+        $rtOorWorkbook.Close($false)
+    }
+    if ($null -ne $cmmrOorWorkbook) {
+        $cmmrOorWorkbook.Close($false)
+    }
     if ($null -ne $workbook) {
         $workbook.Close($false)
     }
@@ -677,7 +1104,16 @@ finally {
         $excel.Quit()
     }
 
-    foreach ($comObject in @($retailWorksheet, $cmmrWorksheet, $workbook, $excel)) {
+    foreach ($comObject in @(
+        $rtOorWorksheet,
+        $rtOorWorkbook,
+        $cmmrOorWorksheet,
+        $cmmrOorWorkbook,
+        $retailWorksheet,
+        $cmmrWorksheet,
+        $workbook,
+        $excel
+    )) {
         Release-ComObject -ComObject $comObject
     }
 
