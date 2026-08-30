@@ -327,6 +327,173 @@ function Release-ComObject {
     }
 }
 
+function Register-ExcelComRetryFilter {
+    if (-not ('ExcelComRetryFilter' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+[ComImport]
+[Guid("00000016-0000-0000-C000-000000000046")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IOleMessageFilter
+{
+    [PreserveSig]
+    int HandleInComingCall(
+        int callType,
+        IntPtr taskCaller,
+        int tickCount,
+        IntPtr interfaceInfo);
+
+    [PreserveSig]
+    int RetryRejectedCall(
+        IntPtr taskCallee,
+        int tickCount,
+        int rejectType);
+
+    [PreserveSig]
+    int MessagePending(
+        IntPtr taskCallee,
+        int tickCount,
+        int pendingType);
+}
+
+public sealed class ExcelComRetryFilter : IOleMessageFilter
+{
+    private const int ServerCallRejected = 1;
+    private const int ServerCallRetryLater = 2;
+    private const int PendingMessageWaitDefault = 2;
+    private const int MaximumRetryDurationMilliseconds = 10000;
+    private const int RetryDelayMilliseconds = 250;
+
+    private static ExcelComRetryFilter currentFilter;
+    private static IOleMessageFilter previousFilter;
+
+    [DllImport("Ole32.dll")]
+    private static extern int CoRegisterMessageFilter(
+        IOleMessageFilter newFilter,
+        out IOleMessageFilter oldFilter);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(
+        IntPtr windowHandle,
+        out uint processId);
+
+    public static void Register()
+    {
+        if (currentFilter != null)
+        {
+            return;
+        }
+
+        currentFilter = new ExcelComRetryFilter();
+        IOleMessageFilter oldFilter;
+        CoRegisterMessageFilter(currentFilter, out oldFilter);
+        previousFilter = oldFilter;
+    }
+
+    public static void Revoke()
+    {
+        IOleMessageFilter ignored;
+        CoRegisterMessageFilter(previousFilter, out ignored);
+        previousFilter = null;
+        currentFilter = null;
+    }
+
+    public static int GetProcessId(IntPtr windowHandle)
+    {
+        uint processId;
+        GetWindowThreadProcessId(windowHandle, out processId);
+        return unchecked((int)processId);
+    }
+
+    public int HandleInComingCall(
+        int callType,
+        IntPtr taskCaller,
+        int tickCount,
+        IntPtr interfaceInfo)
+    {
+        return 0;
+    }
+
+    public int RetryRejectedCall(
+        IntPtr taskCallee,
+        int tickCount,
+        int rejectType)
+    {
+        bool isRetryable =
+            rejectType == ServerCallRejected ||
+            rejectType == ServerCallRetryLater;
+
+        if (isRetryable && tickCount < MaximumRetryDurationMilliseconds)
+        {
+            return RetryDelayMilliseconds;
+        }
+
+        return -1;
+    }
+
+    public int MessagePending(
+        IntPtr taskCallee,
+        int tickCount,
+        int pendingType)
+    {
+        return PendingMessageWaitDefault;
+    }
+}
+
+public sealed class ExcelShutdownWatchdog : IDisposable
+{
+    private readonly Process process;
+    private readonly Timer timer;
+    private int terminated;
+
+    private ExcelShutdownWatchdog(Process process, int timeoutMilliseconds)
+    {
+        this.process = process;
+        timer = new Timer(OnTimeout, null, timeoutMilliseconds, Timeout.Infinite);
+    }
+
+    public bool Terminated
+    {
+        get { return Interlocked.CompareExchange(ref terminated, 0, 0) == 1; }
+    }
+
+    public static ExcelShutdownWatchdog Start(
+        Process process,
+        int timeoutMilliseconds)
+    {
+        return new ExcelShutdownWatchdog(process, timeoutMilliseconds);
+    }
+
+    private void OnTimeout(object state)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill();
+                Interlocked.Exchange(ref terminated, 1);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    public void Dispose()
+    {
+        timer.Dispose();
+    }
+}
+'@
+    }
+
+    [ExcelComRetryFilter]::Register()
+}
+
 function Save-WorkbookWithRetry {
     param(
         [Parameter(Mandatory = $true)]
@@ -1030,14 +1197,28 @@ $cmmrOorWorkbook = $null
 $cmmrOorWorksheet = $null
 $rtOorWorkbook = $null
 $rtOorWorksheet = $null
+$excelComFilterRegistered = $false
+$excelProcessId = 0
+$excelProcess = $null
 
 try {
+    Register-ExcelComRetryFilter
+    $excelComFilterRegistered = $true
+
     $excel = New-Object -ComObject Excel.Application
+    $excelProcessId = [ExcelComRetryFilter]::GetProcessId(
+        [IntPtr]$excel.Hwnd
+    )
+    $excelProcess = [System.Diagnostics.Process]::GetProcessById(
+        $excelProcessId
+    )
+    [void]$excelProcess.Handle
     $excel.Visible = $false
     $excel.DisplayAlerts = $false
     $excel.EnableEvents = $false
     $excel.AskToUpdateLinks = $false
     $excel.AutomationSecurity = 3
+    $excel.ScreenUpdating = $false
 
     $workbook = $excel.Workbooks.Open($resolvedWorkbookPath, 0, $false)
     if ([bool]$workbook.ReadOnly) {
@@ -1053,6 +1234,7 @@ try {
     }
     $cmmrOorWorksheet = $cmmrOorWorkbook.Worksheets.Item(1)
     $rtOorWorksheet = $rtOorWorkbook.Worksheets.Item(1)
+    $excel.Calculation = -4135
 
     Remove-Worksheet -Workbook $workbook -WorksheetName '__CMMR_INV_TEMP__'
     Remove-Worksheet -Workbook $workbook -WorksheetName '__RETAIL_INV_TEMP__'
@@ -1128,6 +1310,14 @@ try {
     Write-Host 'CMMR-RT inventory and system confirmation update succeeded.'
 }
 finally {
+    $shutdownWatchdog = $null
+    if ($null -ne $excelProcess -and -not $excelProcess.HasExited) {
+        $shutdownWatchdog = [ExcelShutdownWatchdog]::Start(
+            $excelProcess,
+            15000
+        )
+    }
+
     if ($null -ne $rtOorWorkbook) {
         try {
             $rtOorWorkbook.Close($false)
@@ -1178,4 +1368,30 @@ finally {
     [GC]::WaitForPendingFinalizers()
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()
+
+    if ($excelComFilterRegistered) {
+        [ExcelComRetryFilter]::Revoke()
+    }
+
+    if ($null -ne $excelProcess) {
+        try {
+            if (-not $excelProcess.HasExited -and
+                -not $excelProcess.WaitForExit(5000)) {
+                $excelProcess.Kill()
+                $excelProcess.WaitForExit()
+                Write-Warning "Terminated the unresponsive Excel process $excelProcessId."
+            }
+        }
+        catch [System.InvalidOperationException] {
+        }
+        finally {
+            if ($null -ne $shutdownWatchdog) {
+                if ($shutdownWatchdog.Terminated) {
+                    Write-Warning "The Excel shutdown watchdog terminated process $excelProcessId."
+                }
+                $shutdownWatchdog.Dispose()
+            }
+            $excelProcess.Dispose()
+        }
+    }
 }

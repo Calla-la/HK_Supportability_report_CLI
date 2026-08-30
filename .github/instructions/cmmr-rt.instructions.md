@@ -34,6 +34,9 @@ When the user says "Run the CMMR-RT inventory and system confirmation update":
 - Complete one successful save for each target workbook.
 - Retry only Excel COM save failures, up to three attempts per workbook, and
   report the exact workbook name if all attempts fail.
+- Retry rejected Excel COM calls for at most 10 seconds per call.
+- Terminate only the Excel process created by the script if it remains
+  unresponsive after the script's close and quit attempts.
 
 ## Process CMMR_INV_RAW_DATA.XLS
 
