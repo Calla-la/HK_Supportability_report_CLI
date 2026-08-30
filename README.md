@@ -11,6 +11,12 @@ Automates the CMMR-RT inventory and system confirmation update workflow.
   Supportability refresh requirements
 - `scripts/Update-CmmrSupportability.ps1` — CMMR Supportability refresh
   implementation
+- `.github/instructions/retail-supportability.instructions.md` — Retail and
+  combined Supportability refresh requirements
+- `scripts/Update-RetailSupportability.ps1` — Retail Supportability refresh
+  implementation
+- `scripts/Update-SupportabilityReports.ps1` — combined CMMR and Retail entry
+  point
 
 ## Run
 
