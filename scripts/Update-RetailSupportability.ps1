@@ -519,45 +519,214 @@ function Get-RetailInventory {
     return ,$maps
 }
 
-function Set-CellValue {
+function Get-LastDataRow {
     param(
         [Parameter(Mandatory = $true)][object]$Worksheet,
-        [Parameter(Mandatory = $true)][int]$Row,
-        [Parameter(Mandatory = $true)][int]$Column,
-        [AllowNull()][object]$Value
+        [Parameter(Mandatory = $true)][int]$Column
     )
-    Invoke-ExcelComRetry -Context "write row $Row, column $Column" -Operation {
-        $cell = $null
+
+    $bottomCell = $null
+    $lastCell = $null
+    try {
+        $bottomCell = $Worksheet.Cells.Item(1048576, $Column)
+        $lastCell = $bottomCell.End(-4162)
+        return [int]$lastCell.Row
+    }
+    finally {
+        Release-ComObject -ComObject $lastCell
+        Release-ComObject -ComObject $bottomCell
+    }
+}
+
+function Get-RowVisibilityRuns {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][int]$StartRow,
+        [Parameter(Mandatory = $true)][int]$EndRow
+    )
+
+    $runs = [Collections.Generic.List[object]]::new()
+    $runStart = $StartRow
+    $runHidden = $null
+    for ($row = $StartRow; $row -le $EndRow; $row++) {
+        $worksheetRow = $Worksheet.Rows.Item($row)
         try {
-            $cell = $Worksheet.Cells.Item($Row, $Column)
-            $cell.Value2 = $Value
+            $hidden = [bool]$worksheetRow.Hidden
         }
         finally {
-            Release-ComObject -ComObject $cell
+            Release-ComObject -ComObject $worksheetRow
+        }
+
+        if ($null -eq $runHidden) {
+            $runHidden = $hidden
+            continue
+        }
+        if ($hidden -eq $runHidden) {
+            continue
+        }
+
+        $runs.Add([pscustomobject]@{
+            StartRow = $runStart
+            EndRow = $row - 1
+        })
+        $runStart = $row
+        $runHidden = $hidden
+    }
+    $runs.Add([pscustomobject]@{
+        StartRow = $runStart
+        EndRow = $EndRow
+    })
+    return $runs.ToArray()
+}
+
+function Get-ColumnVisibilityRuns {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][int]$StartColumn,
+        [Parameter(Mandatory = $true)][int]$EndColumn
+    )
+
+    $runs = [Collections.Generic.List[object]]::new()
+    $runStart = $StartColumn
+    $runHidden = $null
+    for ($column = $StartColumn; $column -le $EndColumn; $column++) {
+        $worksheetColumn = $Worksheet.Columns.Item($column)
+        try {
+            $hidden = [bool]$worksheetColumn.Hidden
+        }
+        finally {
+            Release-ComObject -ComObject $worksheetColumn
+        }
+
+        if ($null -eq $runHidden) {
+            $runHidden = $hidden
+            continue
+        }
+        if ($hidden -eq $runHidden) {
+            continue
+        }
+
+        $runs.Add([pscustomobject]@{
+            StartColumn = $runStart
+            EndColumn = $column - 1
+        })
+        $runStart = $column
+        $runHidden = $hidden
+    }
+    $runs.Add([pscustomobject]@{
+        StartColumn = $runStart
+        EndColumn = $EndColumn
+    })
+    return $runs.ToArray()
+}
+
+function Set-RangeValues {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][object]$Range,
+        [Parameter(Mandatory = $true)][AllowNull()][object[,]]$Values,
+        [Parameter(Mandatory = $true)][object[]]$RowRuns,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    $startRow = [int]$Range.Row
+    $startColumn = [int]$Range.Column
+    $columnCount = $Values.GetLength(1)
+    $columnRuns = Get-ColumnVisibilityRuns `
+        -Worksheet $Worksheet `
+        -StartColumn $startColumn `
+        -EndColumn ($startColumn + $columnCount - 1)
+    foreach ($run in $RowRuns) {
+        $runLength = $run.EndRow - $run.StartRow + 1
+        $sourceStart = $run.StartRow - $startRow
+        foreach ($columnRun in $columnRuns) {
+            $runColumnCount =
+                $columnRun.EndColumn - $columnRun.StartColumn + 1
+            $sourceColumnStart = $columnRun.StartColumn - $startColumn
+            $runValues = New-Object `
+                'object[,]' $runLength, $runColumnCount
+            for ($rowOffset = 0; $rowOffset -lt $runLength; $rowOffset++) {
+                for (
+                    $columnOffset = 0;
+                    $columnOffset -lt $runColumnCount;
+                    $columnOffset++
+                ) {
+                    $runValues[$rowOffset, $columnOffset] = $Values[
+                        ($sourceStart + $rowOffset),
+                        ($sourceColumnStart + $columnOffset)
+                    ]
+                }
+            }
+
+            Invoke-ExcelComRetry `
+                -Context (
+                    "$Context rows $($run.StartRow)-$($run.EndRow), " +
+                    "columns $($columnRun.StartColumn)-$($columnRun.EndColumn)"
+                ) `
+                -Operation {
+                    $firstCell = $null
+                    $lastCell = $null
+                    $runRange = $null
+                    try {
+                        $firstCell = $Worksheet.Cells.Item(
+                            $run.StartRow,
+                            $columnRun.StartColumn
+                        )
+                        $lastCell = $Worksheet.Cells.Item(
+                            $run.EndRow,
+                            $columnRun.EndColumn
+                        )
+                        $runRange = $Worksheet.Range($firstCell, $lastCell)
+                        $runRange.Value2 = $runValues
+                    }
+                    finally {
+                        Release-ComObject -ComObject $runRange
+                        Release-ComObject -ComObject $lastCell
+                        Release-ComObject -ComObject $firstCell
+                    }
+                }
         }
     }
 }
 
-function Assert-CellValue {
+function Assert-ArrayValues {
     param(
-        [Parameter(Mandatory = $true)][object]$Worksheet,
-        [Parameter(Mandatory = $true)][int]$Row,
-        [Parameter(Mandatory = $true)][int]$Column,
-        [Parameter(Mandatory = $true)][double]$Expected
+        [Parameter(Mandatory = $true)][AllowNull()][array]$Actual,
+        [Parameter(Mandatory = $true)][AllowNull()][array]$Expected,
+        [Parameter(Mandatory = $true)][string]$RangeName
     )
-    Invoke-ExcelComRetry -Context "validate row $Row, column $Column" -Operation {
-        $cell = $null
-        try {
-            $cell = $Worksheet.Cells.Item($Row, $Column)
-            $actual = ConvertTo-Number `
-                -Value $cell.Value2 `
-                -Context "validation row $Row, column $Column"
-            if ([math]::Abs($actual - $Expected) -gt 0.000001) {
-                throw "Validation failed at row $Row, column $Column. Expected $Expected but found $actual."
+
+    $rowCount = $Expected.GetLength(0)
+    $columnCount = $Expected.GetLength(1)
+    if ($Actual.Rank -eq 1 -and
+        $Actual.Length -ne ($rowCount * $columnCount)) {
+        throw "$RangeName validation returned an unexpected value count."
+    }
+
+    for ($rowIndex = 1; $rowIndex -le $rowCount; $rowIndex++) {
+        for (
+            $columnIndex = 1;
+            $columnIndex -le $columnCount;
+            $columnIndex++
+        ) {
+            $actualValue = if ($Actual.Rank -eq 2) {
+                $Actual[$rowIndex, $columnIndex]
             }
-        }
-        finally {
-            Release-ComObject -ComObject $cell
+            else {
+                $Actual[
+                    (($rowIndex - 1) * $columnCount) + ($columnIndex - 1)
+                ]
+            }
+            $numericActual = ConvertTo-Number `
+                -Value $actualValue `
+                -Context "$RangeName validation"
+            $expectedValue = [double]$Expected[
+                ($rowIndex - 1),
+                ($columnIndex - 1)
+            ]
+            if ([math]::Abs($numericActual - $expectedValue) -gt 0.000001) {
+                throw "$RangeName validation failed at relative row $rowIndex, column $columnIndex. Expected $expectedValue but found $numericActual."
+            }
         }
     }
 }
@@ -625,24 +794,28 @@ public static class RetailExcelProcessResolver
     $inventorySheet = $sourceWorkbook.Worksheets.Item('Retail INV')
     $targetSheet = $destinationWorkbook.Worksheets.Item('Supportability')
 
-    $oorUsed = $oorSheet.UsedRange
-    $oorLastRow = [int]$oorUsed.Row + [int]$oorUsed.Rows.Count - 1
+    $oorLastRow = [math]::Max(
+        (Get-LastDataRow -Worksheet $oorSheet -Column 16),
+        (Get-LastDataRow -Worksheet $oorSheet -Column 27)
+    )
     $oorRange = $oorSheet.Range("A1:AP$oorLastRow")
     $oorValues = $oorRange.Value2
 
-    $ddrUsed = $ddrSheet.UsedRange
-    $ddrLastRow = [int]$ddrUsed.Row + [int]$ddrUsed.Rows.Count - 1
+    $ddrLastRow = [math]::Max(
+        (Get-LastDataRow -Worksheet $ddrSheet -Column 2),
+        (Get-LastDataRow -Worksheet $ddrSheet -Column 36)
+    )
     $ddrRange = $ddrSheet.Range("A1:CZ$ddrLastRow")
     $ddrValues = $ddrRange.Value2
 
-    $inventoryUsed = $inventorySheet.UsedRange
-    $inventoryLastRow = [int]$inventoryUsed.Row +
-        [int]$inventoryUsed.Rows.Count - 1
+    $inventoryLastRow = Get-LastDataRow -Worksheet $inventorySheet -Column 1
     $inventoryRange = $inventorySheet.Range("A1:J$inventoryLastRow")
     $inventoryValues = $inventoryRange.Value2
 
-    $targetUsed = $targetSheet.UsedRange
-    $targetLastRow = [int]$targetUsed.Row + [int]$targetUsed.Rows.Count - 1
+    $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 16
+    if ($targetLastRow -lt $targetStartRow) {
+        throw 'The destination Supportability sheet has no product rows.'
+    }
     $productRange = $targetSheet.Range("P${targetStartRow}:P${targetLastRow}")
     $productValues = $productRange.Value2
 
@@ -657,27 +830,30 @@ public static class RetailExcelProcessResolver
     $inventory = Get-RetailInventory `
         -Values $inventoryValues -LastRow $inventoryLastRow
 
-    for ($row = $targetStartRow; $row -le $targetLastRow; $row++) {
-        $productId = Get-Key -Value $productValues[($row - 3), 1]
-        $monthlyValues = @([double]0, [double]0, [double]0)
+    $targetRowCount = $targetLastRow - $targetStartRow + 1
+    $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
+    $openOrderOutput = New-Object 'object[,]' $targetRowCount, 9
+    $weeklyActualOutput = New-Object 'object[,]' $targetRowCount, 1
+    $inventoryHOutput = New-Object 'object[,]' $targetRowCount, 1
+    $inventoryIOutput = New-Object 'object[,]' $targetRowCount, 1
+    $inventoryJOutput = New-Object 'object[,]' $targetRowCount, 1
+
+    for ($outputRow = 0; $outputRow -lt $targetRowCount; $outputRow++) {
+        $productId = Get-Key -Value $productValues[($outputRow + 1), 1]
         for ($index = 0; $index -lt 3; $index++) {
+            $monthValue = [double]0
             if ($index -lt $monthly.Months.Count) {
                 $month = $monthly.Months[$index]
-                $monthlyValues[$index] = Get-MapValue `
+                $monthValue = Get-MapValue `
                     -Map $monthly.Maps[$month] -Key $productId
             }
-            Set-CellValue `
-                -Worksheet $targetSheet -Row $row -Column (21 + $index) `
-                -Value $monthlyValues[$index]
+            $monthlyOutput[$outputRow, $index] = $monthValue
         }
 
-        $asValue = Get-MapValue -Map $dsOpenOrder -Key $productId
-        Set-CellValue -Worksheet $targetSheet -Row $row -Column 45 -Value $asValue
-
-        $currentValue = Get-MapValue `
+        $openOrderOutput[$outputRow, 0] =
+            Get-MapValue -Map $dsOpenOrder -Key $productId
+        $openOrderOutput[$outputRow, 1] = Get-MapValue `
             -Map $weeklyOpenOrder.Current -Key $productId
-        Set-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 46 -Value $currentValue
 
         for ($index = 0; $index -lt 7; $index++) {
             $futureValue = [double]0
@@ -686,24 +862,60 @@ public static class RetailExcelProcessResolver
                     -Map $weeklyOpenOrder.Future[$index].Values `
                     -Key $productId
             }
-            Set-CellValue `
-                -Worksheet $targetSheet -Row $row -Column (47 + $index) `
-                -Value $futureValue
+            $openOrderOutput[$outputRow, (2 + $index)] = $futureValue
         }
 
-        Set-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 72 `
-            -Value (Get-MapValue -Map $weeklyActual.Values -Key $productId)
-        Set-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 88 `
-            -Value (Get-MapValue -Map $inventory[0] -Key $productId)
-        Set-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 90 `
-            -Value (Get-MapValue -Map $inventory[1] -Key $productId)
-        Set-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 92 `
-            -Value (Get-MapValue -Map $inventory[2] -Key $productId)
+        $weeklyActualOutput[$outputRow, 0] =
+            Get-MapValue -Map $weeklyActual.Values -Key $productId
+        $inventoryHOutput[$outputRow, 0] =
+            Get-MapValue -Map $inventory[0] -Key $productId
+        $inventoryIOutput[$outputRow, 0] =
+            Get-MapValue -Map $inventory[1] -Key $productId
+        $inventoryJOutput[$outputRow, 0] =
+            Get-MapValue -Map $inventory[2] -Key $productId
     }
+
+    $monthlyTarget = $targetSheet.Range(
+        "U${targetStartRow}:W${targetLastRow}"
+    )
+    $openOrderTarget = $targetSheet.Range(
+        "AS${targetStartRow}:BA${targetLastRow}"
+    )
+    $weeklyActualTarget = $targetSheet.Range(
+        "BT${targetStartRow}:BT${targetLastRow}"
+    )
+    $inventoryHTarget = $targetSheet.Range(
+        "CJ${targetStartRow}:CJ${targetLastRow}"
+    )
+    $inventoryITarget = $targetSheet.Range(
+        "CL${targetStartRow}:CL${targetLastRow}"
+    )
+    $inventoryJTarget = $targetSheet.Range(
+        "CN${targetStartRow}:CN${targetLastRow}"
+    )
+    $rowRuns = Get-RowVisibilityRuns `
+        -Worksheet $targetSheet `
+        -StartRow $targetStartRow `
+        -EndRow $targetLastRow
+
+    Set-RangeValues -Worksheet $targetSheet -Range $monthlyTarget `
+        -Values $monthlyOutput -RowRuns $rowRuns `
+        -Context 'write Retail Supportability U:W'
+    Set-RangeValues -Worksheet $targetSheet -Range $openOrderTarget `
+        -Values $openOrderOutput -RowRuns $rowRuns `
+        -Context 'write Retail Supportability AS:BA'
+    Set-RangeValues -Worksheet $targetSheet -Range $weeklyActualTarget `
+        -Values $weeklyActualOutput -RowRuns $rowRuns `
+        -Context 'write Retail Supportability BT'
+    Set-RangeValues -Worksheet $targetSheet -Range $inventoryHTarget `
+        -Values $inventoryHOutput -RowRuns $rowRuns `
+        -Context 'write Retail Supportability CJ'
+    Set-RangeValues -Worksheet $targetSheet -Range $inventoryITarget `
+        -Values $inventoryIOutput -RowRuns $rowRuns `
+        -Context 'write Retail Supportability CL'
+    Set-RangeValues -Worksheet $targetSheet -Range $inventoryJTarget `
+        -Values $inventoryJOutput -RowRuns $rowRuns `
+        -Context 'write Retail Supportability CN'
 
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
@@ -731,51 +943,18 @@ public static class RetailExcelProcessResolver
         $destinationWorkbook.Save()
     }
 
-    for ($row = $targetStartRow; $row -le $targetLastRow; $row++) {
-        $productId = Get-Key -Value $productValues[($row - 3), 1]
-        for ($index = 0; $index -lt 3; $index++) {
-            $expected = [double]0
-            if ($index -lt $monthly.Months.Count) {
-                $expected = Get-MapValue `
-                    -Map $monthly.Maps[$monthly.Months[$index]] `
-                    -Key $productId
-            }
-            Assert-CellValue `
-                -Worksheet $targetSheet -Row $row -Column (21 + $index) `
-                -Expected $expected
-        }
-        Assert-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 45 `
-            -Expected (Get-MapValue -Map $dsOpenOrder -Key $productId)
-        Assert-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 46 `
-            -Expected (Get-MapValue `
-                -Map $weeklyOpenOrder.Current -Key $productId)
-        for ($index = 0; $index -lt 7; $index++) {
-            $expected = [double]0
-            if ($index -lt $weeklyOpenOrder.Future.Count) {
-                $expected = Get-MapValue `
-                    -Map $weeklyOpenOrder.Future[$index].Values `
-                    -Key $productId
-            }
-            Assert-CellValue `
-                -Worksheet $targetSheet -Row $row -Column (47 + $index) `
-                -Expected $expected
-        }
-        Assert-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 72 `
-            -Expected (Get-MapValue `
-                -Map $weeklyActual.Values -Key $productId)
-        Assert-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 88 `
-            -Expected (Get-MapValue -Map $inventory[0] -Key $productId)
-        Assert-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 90 `
-            -Expected (Get-MapValue -Map $inventory[1] -Key $productId)
-        Assert-CellValue `
-            -Worksheet $targetSheet -Row $row -Column 92 `
-            -Expected (Get-MapValue -Map $inventory[2] -Key $productId)
-    }
+    Assert-ArrayValues -Actual $monthlyTarget.Value2 `
+        -Expected $monthlyOutput -RangeName 'Supportability U:W'
+    Assert-ArrayValues -Actual $openOrderTarget.Value2 `
+        -Expected $openOrderOutput -RangeName 'Supportability AS:BA'
+    Assert-ArrayValues -Actual $weeklyActualTarget.Value2 `
+        -Expected $weeklyActualOutput -RangeName 'Supportability BT'
+    Assert-ArrayValues -Actual $inventoryHTarget.Value2 `
+        -Expected $inventoryHOutput -RangeName 'Supportability CJ'
+    Assert-ArrayValues -Actual $inventoryITarget.Value2 `
+        -Expected $inventoryIOutput -RangeName 'Supportability CL'
+    Assert-ArrayValues -Actual $inventoryJTarget.Value2 `
+        -Expected $inventoryJOutput -RangeName 'Supportability CN'
 
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
@@ -824,8 +1003,9 @@ finally {
         catch { Write-Warning "Failed to quit Excel: $($_.Exception.Message)" }
     }
     foreach ($object in @(
-        $productRange, $targetUsed, $inventoryRange, $inventoryUsed,
-        $ddrRange, $ddrUsed, $oorRange, $oorUsed, $targetSheet,
+        $inventoryJTarget, $inventoryITarget, $inventoryHTarget,
+        $weeklyActualTarget, $openOrderTarget, $monthlyTarget,
+        $productRange, $inventoryRange, $ddrRange, $oorRange, $targetSheet,
         $inventorySheet, $ddrSheet, $oorSheet, $destinationWorkbook,
         $sourceWorkbook, $excel
     )) { Release-ComObject -ComObject $object }

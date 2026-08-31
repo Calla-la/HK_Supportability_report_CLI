@@ -590,39 +590,173 @@ function Assert-ArrayValues {
     }
 }
 
-function Set-ArrayValues {
+function Get-LastDataRow {
     param(
         [Parameter(Mandatory = $true)]
         [object]$Worksheet,
 
         [Parameter(Mandatory = $true)]
-        [int]$StartRow,
-
-        [Parameter(Mandatory = $true)]
-        [int]$StartColumn,
-
-        [Parameter(Mandatory = $true)]
-        [AllowNull()]
-        [object[,]]$Values
+        [int]$Column
     )
 
-    $rowCount = $Values.GetLength(0)
+    $bottomCell = $null
+    $lastCell = $null
+    try {
+        $bottomCell = $Worksheet.Cells.Item(1048576, $Column)
+        $lastCell = $bottomCell.End(-4162)
+        return [int]$lastCell.Row
+    }
+    finally {
+        Release-ComObject -ComObject $lastCell
+        Release-ComObject -ComObject $bottomCell
+    }
+}
+
+function Get-RowVisibilityRuns {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][int]$StartRow,
+        [Parameter(Mandatory = $true)][int]$EndRow
+    )
+
+    $runs = [System.Collections.Generic.List[object]]::new()
+    $runStart = $StartRow
+    $runHidden = $null
+    for ($row = $StartRow; $row -le $EndRow; $row++) {
+        $worksheetRow = $Worksheet.Rows.Item($row)
+        try {
+            $hidden = [bool]$worksheetRow.Hidden
+        }
+        finally {
+            Release-ComObject -ComObject $worksheetRow
+        }
+
+        if ($null -eq $runHidden) {
+            $runHidden = $hidden
+            continue
+        }
+        if ($hidden -eq $runHidden) {
+            continue
+        }
+
+        $runs.Add([pscustomobject]@{
+            StartRow = $runStart
+            EndRow = $row - 1
+        })
+        $runStart = $row
+        $runHidden = $hidden
+    }
+    $runs.Add([pscustomobject]@{
+        StartRow = $runStart
+        EndRow = $EndRow
+    })
+    return $runs.ToArray()
+}
+
+function Get-ColumnVisibilityRuns {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][int]$StartColumn,
+        [Parameter(Mandatory = $true)][int]$EndColumn
+    )
+
+    $runs = [System.Collections.Generic.List[object]]::new()
+    $runStart = $StartColumn
+    $runHidden = $null
+    for ($column = $StartColumn; $column -le $EndColumn; $column++) {
+        $worksheetColumn = $Worksheet.Columns.Item($column)
+        try {
+            $hidden = [bool]$worksheetColumn.Hidden
+        }
+        finally {
+            Release-ComObject -ComObject $worksheetColumn
+        }
+
+        if ($null -eq $runHidden) {
+            $runHidden = $hidden
+            continue
+        }
+        if ($hidden -eq $runHidden) {
+            continue
+        }
+
+        $runs.Add([pscustomobject]@{
+            StartColumn = $runStart
+            EndColumn = $column - 1
+        })
+        $runStart = $column
+        $runHidden = $hidden
+    }
+    $runs.Add([pscustomobject]@{
+        StartColumn = $runStart
+        EndColumn = $EndColumn
+    })
+    return $runs.ToArray()
+}
+
+function Set-RangeValues {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Worksheet,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Range,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()][object[,]]$Values,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$RowRuns
+    )
+
+    $startRow = [int]$Range.Row
+    $startColumn = [int]$Range.Column
     $columnCount = $Values.GetLength(1)
-    for ($rowIndex = 0; $rowIndex -lt $rowCount; $rowIndex++) {
-        for (
-            $relativeColumn = 0;
-            $relativeColumn -lt $columnCount;
-            $relativeColumn++
-        ) {
-            $cell = $Worksheet.Cells.Item(
-                $StartRow + $rowIndex,
-                $StartColumn + $relativeColumn
-            )
+    $columnRuns = Get-ColumnVisibilityRuns `
+        -Worksheet $Worksheet `
+        -StartColumn $startColumn `
+        -EndColumn ($startColumn + $columnCount - 1)
+    foreach ($run in $RowRuns) {
+        $runLength = $run.EndRow - $run.StartRow + 1
+        $sourceStart = $run.StartRow - $startRow
+        foreach ($columnRun in $columnRuns) {
+            $runColumnCount =
+                $columnRun.EndColumn - $columnRun.StartColumn + 1
+            $sourceColumnStart = $columnRun.StartColumn - $startColumn
+            $runValues = New-Object `
+                'object[,]' $runLength, $runColumnCount
+            for ($rowOffset = 0; $rowOffset -lt $runLength; $rowOffset++) {
+                for (
+                    $columnOffset = 0;
+                    $columnOffset -lt $runColumnCount;
+                    $columnOffset++
+                ) {
+                    $runValues[$rowOffset, $columnOffset] = $Values[
+                        ($sourceStart + $rowOffset),
+                        ($sourceColumnStart + $columnOffset)
+                    ]
+                }
+            }
+
+            $firstCell = $null
+            $lastCell = $null
+            $runRange = $null
             try {
-                $cell.Value2 = $Values[$rowIndex, $relativeColumn]
+                $firstCell = $Worksheet.Cells.Item(
+                    $run.StartRow,
+                    $columnRun.StartColumn
+                )
+                $lastCell = $Worksheet.Cells.Item(
+                    $run.EndRow,
+                    $columnRun.EndColumn
+                )
+                $runRange = $Worksheet.Range($firstCell, $lastCell)
+                $runRange.Value2 = $runValues
             }
             finally {
-                Release-ComObject -ComObject $cell
+                Release-ComObject -ComObject $runRange
+                Release-ComObject -ComObject $lastCell
+                Release-ComObject -ComObject $firstCell
             }
         }
     }
@@ -696,24 +830,25 @@ public static class ExcelProcessResolver
     $inventorySheet = $sourceWorkbook.Worksheets.Item('CMMR INV')
     $targetSheet = $destinationWorkbook.Worksheets.Item('Supportability')
 
-    $oorUsed = $oorSheet.UsedRange
-    $oorLastRow = [int]$oorUsed.Row + [int]$oorUsed.Rows.Count - 1
-    $oorRange = $oorSheet.Range("A1:BI$oorLastRow")
+    $oorLastRow = [math]::Max(
+        (Get-LastDataRow -Worksheet $oorSheet -Column 3),
+        (Get-LastDataRow -Worksheet $oorSheet -Column 16)
+    )
+    $oorRange = $oorSheet.Range("A1:V$oorLastRow")
     $oorValues = $oorRange.Value2
 
-    $ddrUsed = $ddrPivotSheet.UsedRange
-    $ddrLastRow = [int]$ddrUsed.Row + [int]$ddrUsed.Rows.Count - 1
+    $ddrLastRow = [math]::Max(
+        (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 2),
+        (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 36)
+    )
     $ddrRange = $ddrPivotSheet.Range("A1:CZ$ddrLastRow")
     $ddrValues = $ddrRange.Value2
 
-    $inventoryUsed = $inventorySheet.UsedRange
-    $inventoryLastRow = [int]$inventoryUsed.Row +
-        [int]$inventoryUsed.Rows.Count - 1
+    $inventoryLastRow = Get-LastDataRow -Worksheet $inventorySheet -Column 1
     $inventoryRange = $inventorySheet.Range("A1:J$inventoryLastRow")
     $inventoryValues = $inventoryRange.Value2
 
-    $targetUsed = $targetSheet.UsedRange
-    $targetLastRow = [int]$targetUsed.Row + [int]$targetUsed.Rows.Count - 1
+    $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 12
     if ($targetLastRow -lt $targetStartRow) {
         throw 'The destination Supportability sheet has no product rows.'
     }
@@ -806,22 +941,26 @@ public static class ExcelProcessResolver
     $stockWeeklyTarget = $targetSheet.Range(
         "AN${targetStartRow}:AO${targetLastRow}"
     )
+    $rowRuns = Get-RowVisibilityRuns `
+        -Worksheet $targetSheet `
+        -StartRow $targetStartRow `
+        -EndRow $targetLastRow
 
-    Set-ArrayValues `
+    Set-RangeValues `
         -Worksheet $targetSheet `
-        -StartRow $targetStartRow `
-        -StartColumn 15 `
-        -Values $monthlyOutput
-    Set-ArrayValues `
+        -Range $monthlyTarget `
+        -Values $monthlyOutput `
+        -RowRuns $rowRuns
+    Set-RangeValues `
         -Worksheet $targetSheet `
-        -StartRow $targetStartRow `
-        -StartColumn 19 `
-        -Values $openOrderOutput
-    Set-ArrayValues `
+        -Range $openOrderTarget `
+        -Values $openOrderOutput `
+        -RowRuns $rowRuns
+    Set-RangeValues `
         -Worksheet $targetSheet `
-        -StartRow $targetStartRow `
-        -StartColumn 40 `
-        -Values $stockWeeklyOutput
+        -Range $stockWeeklyTarget `
+        -Values $stockWeeklyOutput `
+        -RowRuns $rowRuns
 
     $destinationWorkbook.Save()
 
@@ -871,13 +1010,9 @@ finally {
         $openOrderTarget,
         $monthlyTarget,
         $targetProductRange,
-        $targetUsed,
         $inventoryRange,
-        $inventoryUsed,
         $ddrRange,
-        $ddrUsed,
         $oorRange,
-        $oorUsed,
         $targetSheet,
         $inventorySheet,
         $ddrPivotSheet,

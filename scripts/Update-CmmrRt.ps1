@@ -879,6 +879,83 @@ function Get-OorHeaderIndexes {
     return ,$headers
 }
 
+function Get-LastDataRow {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Worksheet,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Column
+    )
+
+    $bottomCell = $null
+    $lastCell = $null
+    try {
+        $bottomCell = $Worksheet.Cells.Item(1048576, $Column)
+        $lastCell = $bottomCell.End(-4162)
+        return [int]$lastCell.Row
+    }
+    finally {
+        Release-ComObject -ComObject $lastCell
+        Release-ComObject -ComObject $bottomCell
+    }
+}
+
+function Set-OrAssert-RowColors {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Worksheet,
+
+        [Parameter(Mandatory = $true)]
+        [int[]]$ExpectedColors,
+
+        [Parameter(Mandatory = $true)]
+        [int]$LastRow,
+
+        [Parameter(Mandatory = $true)]
+        [string]$WorkbookName,
+
+        [switch]$Validate
+    )
+
+    $runStart = 0
+    $runColor = 0
+    for ($rowIndex = 2; $rowIndex -le ($LastRow + 1); $rowIndex++) {
+        $color = if ($rowIndex -le $LastRow) {
+            $ExpectedColors[$rowIndex]
+        }
+        else {
+            0
+        }
+
+        if ($color -eq $runColor) {
+            continue
+        }
+
+        if ($runColor -ne 0) {
+            $rowRange = $Worksheet.Range(
+                "A${runStart}:BX$($rowIndex - 1)"
+            )
+            try {
+                if ($Validate) {
+                    if ([int]$rowRange.Interior.Color -ne $runColor) {
+                        throw "Rows $runStart-$($rowIndex - 1) in '$WorkbookName' have the wrong highlight color."
+                    }
+                }
+                else {
+                    $rowRange.Interior.Color = $runColor
+                }
+            }
+            finally {
+                Release-ComObject -ComObject $rowRange
+            }
+        }
+
+        $runStart = if ($color -ne 0) { $rowIndex } else { 0 }
+        $runColor = $color
+    }
+}
+
 function Set-SystemConfirmationContent {
     param(
         [Parameter(Mandatory = $true)]
@@ -897,7 +974,7 @@ function Set-SystemConfirmationContent {
         [int]$LightBlue
     )
 
-    $usedRange = $null
+    $headerRange = $null
     $sourceRange = $null
     $plantRange = $null
     $plantStart = $null
@@ -907,15 +984,25 @@ function Set-SystemConfirmationContent {
     $pivotCaches = $null
 
     try {
-        $usedRange = $Worksheet.UsedRange
-        $rowCount = [int]$usedRange.Rows.Count
+        $headerRange = $Worksheet.Range('A1:BX1')
+        $headerValues = $headerRange.Value2
+        $headerIndexes = Get-OorHeaderIndexes `
+            -Values $headerValues `
+            -WorkbookName $WorkbookName
+        $rowCount = [math]::Max(
+            (Get-LastDataRow `
+                -Worksheet $Worksheet `
+                -Column $headerIndexes['Order Nbr']),
+            (Get-LastDataRow `
+                -Worksheet $Worksheet `
+                -Column $headerIndexes['SKU'])
+        )
         if ($rowCount -lt 2) {
             throw "Workbook '$WorkbookName' does not contain any data rows."
         }
 
         $sourceRange = $Worksheet.Range("A1:BX$rowCount")
         $values = $sourceRange.Value2
-        $headerIndexes = Get-OorHeaderIndexes -Values $values -WorkbookName $WorkbookName
         $groups = [System.Collections.Hashtable]::new(
             [System.StringComparer]::OrdinalIgnoreCase
         )
@@ -1038,18 +1125,13 @@ function Set-SystemConfirmationContent {
 
         $releaseRange = $Worksheet.Range("BX2:BX$rowCount")
         $releaseRange.Formula = $releaseValues
+        [void]$releaseRange.Calculate()
 
-        for ($rowIndex = 2; $rowIndex -le $rowCount; $rowIndex++) {
-            if ($scheduleIsZero[$rowIndex]) {
-                $rowRange = $Worksheet.Range("A${rowIndex}:BX${rowIndex}")
-                try {
-                    $rowRange.Interior.Color = $expectedColors[$rowIndex]
-                }
-                finally {
-                    Release-ComObject -ComObject $rowRange
-                }
-            }
-        }
+        Set-OrAssert-RowColors `
+            -Worksheet $Worksheet `
+            -ExpectedColors $expectedColors `
+            -LastRow $rowCount `
+            -WorkbookName $WorkbookName
 
         $pivotCaches = $Workbook.PivotCaches()
         for ($cacheIndex = 1; $cacheIndex -le $pivotCaches.Count; $cacheIndex++) {
@@ -1081,7 +1163,7 @@ function Set-SystemConfirmationContent {
             $plantEnd,
             $plantStart,
             $sourceRange,
-            $usedRange
+            $headerRange
         )) {
             Release-ComObject -ComObject $comObject
         }
@@ -1139,19 +1221,14 @@ function Assert-SystemConfirmationContent {
                 throw "Date to release at row $rowIndex in '$WorkbookName' is incorrect."
             }
 
-            if ($Expected.ScheduleIsZero[$rowIndex]) {
-                $rowRange = $Worksheet.Range("A${rowIndex}:BX${rowIndex}")
-                try {
-                    if ([int]$rowRange.Interior.Color -ne
-                        $Expected.ExpectedColors[$rowIndex]) {
-                        throw "Row $rowIndex in '$WorkbookName' has the wrong highlight color."
-                    }
-                }
-                finally {
-                    Release-ComObject -ComObject $rowRange
-                }
-            }
         }
+
+        Set-OrAssert-RowColors `
+            -Worksheet $Worksheet `
+            -ExpectedColors $Expected.ExpectedColors `
+            -LastRow $Expected.RowCount `
+            -WorkbookName $WorkbookName `
+            -Validate
     }
     finally {
         foreach ($comObject in @(
@@ -1281,7 +1358,6 @@ try {
         -LightGreen $lightGreen `
         -LightBlue $lightBlue
 
-    $excel.CalculateFull()
     Save-WorkbookWithRetry `
         -Workbook $workbook `
         -WorkbookName (Split-Path -Leaf $resolvedWorkbookPath)
