@@ -412,7 +412,8 @@ function Get-MonthlyActuals {
     $months = [Collections.Generic.List[string]]::new()
     $columnMonths = @{}
     $currentMonth = $null
-    for ($column = 5; $column -le 29; $column++) {
+    # Scan only DDR pivot A:AC so month blocks can move within that range.
+    for ($column = 1; $column -le 29; $column++) {
         $header = Get-Key -Value $Values[7, $column]
         if ($header -eq 'GRAND TOTAL') { break }
         if ($header -match '^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)') {
