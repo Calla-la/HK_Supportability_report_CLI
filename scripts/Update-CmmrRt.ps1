@@ -1389,7 +1389,54 @@ try {
         -WorkbookName 'RT ALLRG OOR.xlsx' `
         -Expected $rtOorExpected
 
-    Write-Host 'CMMR-RT inventory and system confirmation update succeeded.'
+    Remove-Worksheet -Workbook $workbook -WorksheetName 'CMMR confirmation'
+    Remove-Worksheet -Workbook $workbook -WorksheetName 'RT confirmation'
+
+    $cmmrOorWorksheet.Name = 'CMMR confirmation'
+    $rtOorWorksheet.Name = 'RT confirmation'
+
+    $lastWorksheet = $workbook.Worksheets.Item($workbook.Worksheets.Count)
+    try {
+        $cmmrOorWorksheet.Copy([Type]::Missing, $lastWorksheet)
+    }
+    finally {
+        Release-ComObject -ComObject $lastWorksheet
+        $lastWorksheet = $null
+    }
+
+    $lastWorksheet = $workbook.Worksheets.Item($workbook.Worksheets.Count)
+    try {
+        $rtOorWorksheet.Copy([Type]::Missing, $lastWorksheet)
+    }
+    finally {
+        Release-ComObject -ComObject $lastWorksheet
+        $lastWorksheet = $null
+    }
+
+    Save-WorkbookWithRetry `
+        -Workbook $cmmrOorWorkbook `
+        -WorkbookName (Split-Path -Leaf $cmmrOorPath)
+    Save-WorkbookWithRetry `
+        -Workbook $rtOorWorkbook `
+        -WorkbookName (Split-Path -Leaf $rtOorPath)
+    Save-WorkbookWithRetry `
+        -Workbook $workbook `
+        -WorkbookName (Split-Path -Leaf $resolvedWorkbookPath)
+
+    Assert-WorksheetNameCount `
+        -Workbook $cmmrOorWorkbook `
+        -WorksheetName 'CMMR confirmation'
+    Assert-WorksheetNameCount `
+        -Workbook $rtOorWorkbook `
+        -WorksheetName 'RT confirmation'
+    Assert-WorksheetNameCount `
+        -Workbook $workbook `
+        -WorksheetName 'CMMR confirmation'
+    Assert-WorksheetNameCount `
+        -Workbook $workbook `
+        -WorksheetName 'RT confirmation'
+
+    Write-Host 'CMMR-RT inventory, system confirmation, and confirmation-sheet copy update succeeded.'
 }
 finally {
     $shutdownWatchdog = $null
