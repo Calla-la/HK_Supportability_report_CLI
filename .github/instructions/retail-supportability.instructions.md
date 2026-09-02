@@ -51,9 +51,9 @@ The Retail implementation is `scripts/Update-RetailSupportability.ps1`.
 
 Match `Retail INV` Material to destination Product ID:
 
-- Source `H` to destination `CJ`.
-- Source `I` to destination `CL`.
-- Source `J` to destination `CN`.
+- Source `H` to destination `CF`.
+- Source `I` to destination `CH`.
+- Source `J` to destination `CJ`.
 
 ## Retail Task 5 - Dynamic Weekly Actual SI
 
@@ -65,7 +65,7 @@ Match `Retail INV` Material to destination Product ID:
 
 ## Protection requirements
 
-- Only write destination columns `U:W`, `AS:BA`, `BT`, `CJ`, `CL`, and `CN`
+- Only write destination columns `U:W`, `AS:BA`, `BT`, `CF`, `CH`, and `CJ`
   from row 4 onward, plus headers `AU3:BA3`.
 - Do not change `AT3`.
 - Preserve all existing cell formatting and number formats, except set

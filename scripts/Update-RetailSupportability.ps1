@@ -885,13 +885,13 @@ public static class RetailExcelProcessResolver
         "BT${targetStartRow}:BT${targetLastRow}"
     )
     $inventoryHTarget = $targetSheet.Range(
-        "CJ${targetStartRow}:CJ${targetLastRow}"
+        "CF${targetStartRow}:CF${targetLastRow}"
     )
     $inventoryITarget = $targetSheet.Range(
-        "CL${targetStartRow}:CL${targetLastRow}"
+        "CH${targetStartRow}:CH${targetLastRow}"
     )
     $inventoryJTarget = $targetSheet.Range(
-        "CN${targetStartRow}:CN${targetLastRow}"
+        "CJ${targetStartRow}:CJ${targetLastRow}"
     )
     $rowRuns = Get-RowVisibilityRuns `
         -Worksheet $targetSheet `
@@ -909,13 +909,13 @@ public static class RetailExcelProcessResolver
         -Context 'write Retail Supportability BT'
     Set-RangeValues -Worksheet $targetSheet -Range $inventoryHTarget `
         -Values $inventoryHOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability CJ'
+        -Context 'write Retail Supportability CF'
     Set-RangeValues -Worksheet $targetSheet -Range $inventoryITarget `
         -Values $inventoryIOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability CL'
+        -Context 'write Retail Supportability CH'
     Set-RangeValues -Worksheet $targetSheet -Range $inventoryJTarget `
         -Values $inventoryJOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability CN'
+        -Context 'write Retail Supportability CJ'
 
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
@@ -950,11 +950,11 @@ public static class RetailExcelProcessResolver
     Assert-ArrayValues -Actual $weeklyActualTarget.Value2 `
         -Expected $weeklyActualOutput -RangeName 'Supportability BT'
     Assert-ArrayValues -Actual $inventoryHTarget.Value2 `
-        -Expected $inventoryHOutput -RangeName 'Supportability CJ'
+        -Expected $inventoryHOutput -RangeName 'Supportability CF'
     Assert-ArrayValues -Actual $inventoryITarget.Value2 `
-        -Expected $inventoryIOutput -RangeName 'Supportability CL'
+        -Expected $inventoryIOutput -RangeName 'Supportability CH'
     Assert-ArrayValues -Actual $inventoryJTarget.Value2 `
-        -Expected $inventoryJOutput -RangeName 'Supportability CN'
+        -Expected $inventoryJOutput -RangeName 'Supportability CJ'
 
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
