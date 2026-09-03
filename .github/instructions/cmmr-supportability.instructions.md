@@ -37,7 +37,7 @@ Write values to destination columns `S:V`:
   by SKU.
 - `U`: From `HK OOR Pivot!N:V`, sum values for SoldTo Nbr `5395800`,
   `5395799`, and `5395801` by SKU.
-- `V`: From `HK OOR Pivot!N:V`, sum values for SoldTo Nbr `1001089`
+- `V`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `1001089`
   by SKU.
 
 ## Task 2 - Monthly Actual SI

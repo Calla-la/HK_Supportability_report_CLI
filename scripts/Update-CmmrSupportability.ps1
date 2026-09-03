@@ -884,10 +884,10 @@ public static class ExcelProcessResolver
     $columnV = Get-PivotBlockTotals `
         -Values $oorValues `
         -LastRow $oorLastRow `
-        -SkuColumn 16 `
+        -SkuColumn 3 `
         -SoldToHeaderRow 8 `
-        -FirstValueColumn 17 `
-        -LastValueColumn 22 `
+        -FirstValueColumn 4 `
+        -LastValueColumn 10 `
         -IncludedSoldTo @('1001089')
     $monthly = Get-MonthlyActuals -Values $ddrValues -LastRow $ddrLastRow
     $weekly = Get-WeeklyActuals `
