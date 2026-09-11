@@ -11,12 +11,16 @@ Automates the CMMR-RT inventory and system confirmation update workflow.
   Supportability refresh requirements
 - `scripts/Update-CmmrSupportability.ps1` — CMMR Supportability refresh
   implementation
+- `scripts/Update-CmmrConfirmation.ps1` — CMMR confirmation-only `X:AB`
+  refresh entry point
 - `.github/instructions/retail-supportability.instructions.md` — Retail and
   combined Supportability refresh requirements
 - `scripts/Update-RetailSupportability.ps1` — Retail Supportability refresh
   implementation
+- `scripts/Update-HkAllOor.ps1` — `HK all OOR` source replacement and
+  `HK OOR Pivot` refresh implementation
 - `scripts/Update-SupportabilityReports.ps1` — combined CMMR and Retail entry
-  point
+  point; refreshes `HK all OOR` before both reports
 
 ## Run
 

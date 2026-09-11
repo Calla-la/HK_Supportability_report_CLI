@@ -8,10 +8,18 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$DestinationWorkbookPath,
 
-    [datetime]$AsOfDate = (Get-Date)
+    [datetime]$AsOfDate = (Get-Date),
+
+    [switch]$ConfirmationOnly,
+
+    [switch]$SkipConfirmation
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ($ConfirmationOnly -and $SkipConfirmation) {
+    throw 'ConfirmationOnly and SkipConfirmation cannot be used together.'
+}
 
 $targetStartRow = 4
 $targetProductIdColumn = 12
@@ -1095,13 +1103,15 @@ foreach ($path in @($SourceWorkbookPath, $DestinationWorkbookPath)) {
 
 $sourcePath = (Resolve-Path -LiteralPath $SourceWorkbookPath).Path
 $destinationPath = (Resolve-Path -LiteralPath $DestinationWorkbookPath).Path
-$ibPoSourcePath = Join-Path `
-    -Path (Split-Path -Parent $sourcePath) `
-    -ChildPath 'HK ALL IB PO.XLSX'
-if (-not (Test-Path -LiteralPath $ibPoSourcePath -PathType Leaf)) {
-    throw "IB PO source workbook not found: $ibPoSourcePath"
+if (-not $SkipConfirmation) {
+    $ibPoSourcePath = Join-Path `
+        -Path (Split-Path -Parent $sourcePath) `
+        -ChildPath 'HK ALL IB PO.XLSX'
+    if (-not (Test-Path -LiteralPath $ibPoSourcePath -PathType Leaf)) {
+        throw "IB PO source workbook not found: $ibPoSourcePath"
+    }
+    $ibPoSourcePath = (Resolve-Path -LiteralPath $ibPoSourcePath).Path
 }
-$ibPoSourcePath = (Resolve-Path -LiteralPath $ibPoSourcePath).Path
 $excel = $null
 $sourceWorkbook = $null
 $destinationWorkbook = $null
@@ -1152,88 +1162,90 @@ public static class ExcelProcessResolver
     $excel.AutomationSecurity = 3
     $excel.ScreenUpdating = $false
 
-    $ibPoSourceWorkbook = $excel.Workbooks.Open(
-        $ibPoSourcePath,
-        0,
-        $true
-    )
-    $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, $false)
-    if ([bool]$sourceWorkbook.ReadOnly) {
-        throw "Source workbook opened as read-only and cannot update IB PO: $sourcePath"
-    }
+    if (-not $SkipConfirmation) {
+        $ibPoSourceWorkbook = $excel.Workbooks.Open(
+            $ibPoSourcePath,
+            0,
+            $true
+        )
+        $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, $false)
+        if ([bool]$sourceWorkbook.ReadOnly) {
+            throw "Source workbook opened as read-only and cannot update IB PO: $sourcePath"
+        }
 
-    $ibPoRawSheet = $ibPoSourceWorkbook.Worksheets.Item(1)
-    $ibPoLastRow = Get-LastDataRow -Worksheet $ibPoRawSheet -Column 16
-    if ($ibPoLastRow -lt 2) {
-        throw "IB PO source worksheet has no data rows: $ibPoSourcePath"
-    }
+        $ibPoRawSheet = $ibPoSourceWorkbook.Worksheets.Item(1)
+        $ibPoLastRow = Get-LastDataRow -Worksheet $ibPoRawSheet -Column 16
+        if ($ibPoLastRow -lt 2) {
+            throw "IB PO source worksheet has no data rows: $ibPoSourcePath"
+        }
 
-    $ibPoHeaderCell = $ibPoRawSheet.Cells.Item(1, 23)
-    $ibPoHeaderCell.Value2 = 'IB PO RDD'
-    $ibPoRddRange = $ibPoRawSheet.Range("W2:W$ibPoLastRow")
-    $ibPoRddRange.FormulaR1C1 =
-        '=IF(RC[-7]="","",RC[-7]-WEEKDAY(RC[-7],2)+5)'
-    $ibPoRddRange.Calculate()
-    $ibPoRddRange.Value2 = $ibPoRddRange.Value2
-    $ibPoRddRange.NumberFormat = 'yyyy-mm-dd'
+        $ibPoHeaderCell = $ibPoRawSheet.Cells.Item(1, 23)
+        $ibPoHeaderCell.Value2 = 'IB PO RDD'
+        $ibPoRddRange = $ibPoRawSheet.Range("W2:W$ibPoLastRow")
+        $ibPoRddRange.FormulaR1C1 =
+            '=IF(RC[-7]="","",RC[-7]-WEEKDAY(RC[-7],2)+5)'
+        $ibPoRddRange.Calculate()
+        $ibPoRddRange.Value2 = $ibPoRddRange.Value2
+        $ibPoRddRange.NumberFormat = 'yyyy-mm-dd'
 
-    for ($sheetIndex = $sourceWorkbook.Worksheets.Count;
-        $sheetIndex -ge 1;
-        $sheetIndex--) {
-        $candidateSheet = $sourceWorkbook.Worksheets.Item($sheetIndex)
-        try {
-            if ($candidateSheet.Name -eq 'IB PO') {
-                $candidateSheet.Delete()
+        for ($sheetIndex = $sourceWorkbook.Worksheets.Count;
+            $sheetIndex -ge 1;
+            $sheetIndex--) {
+            $candidateSheet = $sourceWorkbook.Worksheets.Item($sheetIndex)
+            try {
+                if ($candidateSheet.Name -eq 'IB PO') {
+                    $candidateSheet.Delete()
+                }
+            }
+            finally {
+                Release-ComObject -ComObject $candidateSheet
             }
         }
-        finally {
-            Release-ComObject -ComObject $candidateSheet
+
+        $lastSourceSheet = $sourceWorkbook.Worksheets.Item(
+            $sourceWorkbook.Worksheets.Count
+        )
+        try {
+            $ibPoRawSheet.Copy([Type]::Missing, $lastSourceSheet)
         }
-    }
+        finally {
+            Release-ComObject -ComObject $lastSourceSheet
+        }
+        $ibPoReplacementSheet = $sourceWorkbook.ActiveSheet
+        $ibPoReplacementSheet.Name = 'IB PO'
 
-    $lastSourceSheet = $sourceWorkbook.Worksheets.Item(
-        $sourceWorkbook.Worksheets.Count
-    )
-    try {
-        $ibPoRawSheet.Copy([Type]::Missing, $lastSourceSheet)
-    }
-    finally {
-        Release-ComObject -ComObject $lastSourceSheet
-    }
-    $ibPoReplacementSheet = $sourceWorkbook.ActiveSheet
-    $ibPoReplacementSheet.Name = 'IB PO'
+        $ibPoPivotSheetForRefresh =
+            $sourceWorkbook.Worksheets.Item('IB PO pvt')
+        $ibPoPivotForRefresh =
+            $ibPoPivotSheetForRefresh.PivotTables().Item(1)
+        if (-not [bool]$ibPoPivotForRefresh.RefreshTable()) {
+            throw 'Failed to refresh the IB PO pvt PivotTable.'
+        }
 
-    $ibPoPivotSheetForRefresh =
-        $sourceWorkbook.Worksheets.Item('IB PO pvt')
-    $ibPoPivotForRefresh =
-        $ibPoPivotSheetForRefresh.PivotTables().Item(1)
-    if (-not [bool]$ibPoPivotForRefresh.RefreshTable()) {
-        throw 'Failed to refresh the IB PO pvt PivotTable.'
+        $sourceWorkbook.Save()
+        $sourceWorkbook.Close($false)
+        $ibPoSourceWorkbook.Close($false)
+        foreach ($comObject in @(
+            $ibPoPivotForRefresh,
+            $ibPoPivotSheetForRefresh,
+            $ibPoReplacementSheet,
+            $ibPoRddRange,
+            $ibPoHeaderCell,
+            $ibPoRawSheet,
+            $sourceWorkbook,
+            $ibPoSourceWorkbook
+        )) {
+            Release-ComObject -ComObject $comObject
+        }
+        $ibPoPivotForRefresh = $null
+        $ibPoPivotSheetForRefresh = $null
+        $ibPoReplacementSheet = $null
+        $ibPoRddRange = $null
+        $ibPoHeaderCell = $null
+        $ibPoRawSheet = $null
+        $sourceWorkbook = $null
+        $ibPoSourceWorkbook = $null
     }
-
-    $sourceWorkbook.Save()
-    $sourceWorkbook.Close($false)
-    $ibPoSourceWorkbook.Close($false)
-    foreach ($comObject in @(
-        $ibPoPivotForRefresh,
-        $ibPoPivotSheetForRefresh,
-        $ibPoReplacementSheet,
-        $ibPoRddRange,
-        $ibPoHeaderCell,
-        $ibPoRawSheet,
-        $sourceWorkbook,
-        $ibPoSourceWorkbook
-    )) {
-        Release-ComObject -ComObject $comObject
-    }
-    $ibPoPivotForRefresh = $null
-    $ibPoPivotSheetForRefresh = $null
-    $ibPoReplacementSheet = $null
-    $ibPoRddRange = $null
-    $ibPoHeaderCell = $null
-    $ibPoRawSheet = $null
-    $sourceWorkbook = $null
-    $ibPoSourceWorkbook = $null
 
     $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, $true)
     $destinationWorkbook = $excel.Workbooks.Open($destinationPath, 0, $false)
@@ -1241,56 +1253,65 @@ public static class ExcelProcessResolver
         throw "Destination workbook opened as read-only: $destinationPath"
     }
 
-    $oorSheet = $sourceWorkbook.Worksheets.Item('HK OOR Pivot')
-    $ddrPivotSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
     $inventorySheet = $sourceWorkbook.Worksheets.Item('CMMR INV')
-    $confirmationSheet = $sourceWorkbook.Worksheets.Item('CMMR confirmation')
-    $ibPoSheet = $sourceWorkbook.Worksheets.Item('IB PO pvt')
     $targetSheet = $destinationWorkbook.Worksheets.Item('Supportability')
 
-    $oorLastRow = [math]::Max(
-        (Get-LastDataRow -Worksheet $oorSheet -Column 3),
-        (Get-LastDataRow -Worksheet $oorSheet -Column 16)
-    )
-    $oorRange = $oorSheet.Range("A1:V$oorLastRow")
-    $oorValues = $oorRange.Value2
+    if (-not $SkipConfirmation) {
+        $confirmationSheet =
+            $sourceWorkbook.Worksheets.Item('CMMR confirmation')
+        $ibPoSheet = $sourceWorkbook.Worksheets.Item('IB PO pvt')
+    }
 
-    $ddrLastRow = [math]::Max(
-        (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 2),
-        (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 36)
-    )
-    $ddrRange = $ddrPivotSheet.Range("A1:CZ$ddrLastRow")
-    $ddrValues = $ddrRange.Value2
+    if (-not $ConfirmationOnly) {
+        $oorSheet = $sourceWorkbook.Worksheets.Item('HK OOR Pivot')
+        $ddrPivotSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
+
+        $oorLastRow = [math]::Max(
+            (Get-LastDataRow -Worksheet $oorSheet -Column 3),
+            (Get-LastDataRow -Worksheet $oorSheet -Column 16)
+        )
+        $oorRange = $oorSheet.Range("A1:V$oorLastRow")
+        $oorValues = $oorRange.Value2
+
+        $ddrLastRow = [math]::Max(
+            (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 2),
+            (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 36)
+        )
+        $ddrRange = $ddrPivotSheet.Range("A1:CZ$ddrLastRow")
+        $ddrValues = $ddrRange.Value2
+    }
 
     $inventoryLastRow = Get-LastDataRow -Worksheet $inventorySheet -Column 1
     $inventoryRange = $inventorySheet.Range("A1:J$inventoryLastRow")
     $inventoryValues = $inventoryRange.Value2
 
-    $confirmationLastRow = Get-LastDataRow `
-        -Worksheet $confirmationSheet `
-        -Column 24
-    $confirmationRange = $confirmationSheet.Range(
-        "A1:BX$confirmationLastRow"
-    )
-    $confirmationValues = $confirmationRange.Value2
+    if (-not $SkipConfirmation) {
+        $confirmationLastRow = Get-LastDataRow `
+            -Worksheet $confirmationSheet `
+            -Column 24
+        $confirmationRange = $confirmationSheet.Range(
+            "A1:BX$confirmationLastRow"
+        )
+        $confirmationValues = $confirmationRange.Value2
 
-    $ibPoPlantRange = $ibPoSheet.Range('A1:B3')
-    $ibPoPlantValues = $ibPoPlantRange.Value2
-    $ibPoPlant = ''
-    for ($rowIndex = 1; $rowIndex -le 3; $rowIndex++) {
-        if ((Get-NormalizedKey -Value $ibPoPlantValues[$rowIndex, 1]) -eq
-            'PLANT') {
-            $ibPoPlant = Get-NormalizedIdentifier `
-                -Value $ibPoPlantValues[$rowIndex, 2]
-            break
+        $ibPoPlantRange = $ibPoSheet.Range('A1:B3')
+        $ibPoPlantValues = $ibPoPlantRange.Value2
+        $ibPoPlant = ''
+        for ($rowIndex = 1; $rowIndex -le 3; $rowIndex++) {
+            if ((Get-NormalizedKey -Value $ibPoPlantValues[$rowIndex, 1]) -eq
+                'PLANT') {
+                $ibPoPlant = Get-NormalizedIdentifier `
+                    -Value $ibPoPlantValues[$rowIndex, 2]
+                break
+            }
         }
+        if ($ibPoPlant -ne '4815') {
+            throw "IB PO pvt must be filtered for Plant 4815, but found '$ibPoPlant'."
+        }
+        $ibPoPivotTable = $ibPoSheet.PivotTables().Item(1)
+        $ibPoRange = $ibPoPivotTable.TableRange1
+        $ibPoValues = $ibPoRange.Value2
     }
-    if ($ibPoPlant -ne '4815') {
-        throw "IB PO pvt must be filtered for Plant 4815, but found '$ibPoPlant'."
-    }
-    $ibPoPivotTable = $ibPoSheet.PivotTables().Item(1)
-    $ibPoRange = $ibPoPivotTable.TableRange1
-    $ibPoValues = $ibPoRange.Value2
 
     $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 12
     if ($targetLastRow -lt $targetStartRow) {
@@ -1301,175 +1322,204 @@ public static class ExcelProcessResolver
     )
     $targetProductValues = $targetProductRange.Value2
 
-    $columnS = Get-PivotBlockTotals `
-        -Values $oorValues `
-        -LastRow $oorLastRow `
-        -SkuColumn 3 `
-        -SoldToHeaderRow 8 `
-        -FirstValueColumn 4 `
-        -LastValueColumn 10 `
-        -IncludedSoldTo @('5395800', '5395801')
-    $columnT = Get-PivotBlockTotals `
-        -Values $oorValues `
-        -LastRow $oorLastRow `
-        -SkuColumn 3 `
-        -SoldToHeaderRow 8 `
-        -FirstValueColumn 4 `
-        -LastValueColumn 10 `
-        -IncludedSoldTo @('5395799')
-    $columnU = Get-PivotBlockTotals `
-        -Values $oorValues `
-        -LastRow $oorLastRow `
-        -SkuColumn 16 `
-        -SoldToHeaderRow 8 `
-        -FirstValueColumn 17 `
-        -LastValueColumn 22 `
-        -IncludedSoldTo @('5395800', '5395799', '5395801')
-    $columnV = Get-PivotBlockTotals `
-        -Values $oorValues `
-        -LastRow $oorLastRow `
-        -SkuColumn 3 `
-        -SoldToHeaderRow 8 `
-        -FirstValueColumn 4 `
-        -LastValueColumn 10 `
-        -IncludedSoldTo @('1001089')
-    $monthly = Get-MonthlyActuals -Values $ddrValues -LastRow $ddrLastRow
-    $weekly = Get-WeeklyActuals `
-        -Values $ddrValues `
-        -LastRow $ddrLastRow `
-        -RunDate $AsOfDate
-    $inventory = Get-InventoryTotals `
-        -Values $inventoryValues `
-        -LastRow $inventoryLastRow
-    $availableSupply = Get-InventoryAvailableSupply `
-        -Values $inventoryValues `
-        -LastRow $inventoryLastRow
-    $ibPoTotals = Get-IbPoConfirmationTotals -Values $ibPoValues
-    $confirmationWeekly = Get-ConfirmationWeeklyBuckets `
-        -Values $confirmationValues `
-        -LastRow $confirmationLastRow `
-        -IbPoTotals $ibPoTotals `
-        -AvailableSupply $availableSupply `
-        -RunDate $AsOfDate
+    if (-not $ConfirmationOnly) {
+        $columnS = Get-PivotBlockTotals `
+            -Values $oorValues `
+            -LastRow $oorLastRow `
+            -SkuColumn 3 `
+            -SoldToHeaderRow 8 `
+            -FirstValueColumn 4 `
+            -LastValueColumn 10 `
+            -IncludedSoldTo @('5395800', '5395801')
+        $columnT = Get-PivotBlockTotals `
+            -Values $oorValues `
+            -LastRow $oorLastRow `
+            -SkuColumn 3 `
+            -SoldToHeaderRow 8 `
+            -FirstValueColumn 4 `
+            -LastValueColumn 10 `
+            -IncludedSoldTo @('5395799')
+        $columnU = Get-PivotBlockTotals `
+            -Values $oorValues `
+            -LastRow $oorLastRow `
+            -SkuColumn 16 `
+            -SoldToHeaderRow 8 `
+            -FirstValueColumn 17 `
+            -LastValueColumn 22 `
+            -IncludedSoldTo @('5395800', '5395799', '5395801')
+        $columnV = Get-PivotBlockTotals `
+            -Values $oorValues `
+            -LastRow $oorLastRow `
+            -SkuColumn 3 `
+            -SoldToHeaderRow 8 `
+            -FirstValueColumn 4 `
+            -LastValueColumn 10 `
+            -IncludedSoldTo @('1001089')
+        $monthly = Get-MonthlyActuals -Values $ddrValues -LastRow $ddrLastRow
+        $weekly = Get-WeeklyActuals `
+            -Values $ddrValues `
+            -LastRow $ddrLastRow `
+            -RunDate $AsOfDate
+        $inventory = Get-InventoryTotals `
+            -Values $inventoryValues `
+            -LastRow $inventoryLastRow
+    }
+    if (-not $SkipConfirmation) {
+        $availableSupply = Get-InventoryAvailableSupply `
+            -Values $inventoryValues `
+            -LastRow $inventoryLastRow
+        $ibPoTotals = Get-IbPoConfirmationTotals -Values $ibPoValues
+        $confirmationWeekly = Get-ConfirmationWeeklyBuckets `
+            -Values $confirmationValues `
+            -LastRow $confirmationLastRow `
+            -IbPoTotals $ibPoTotals `
+            -AvailableSupply $availableSupply `
+            -RunDate $AsOfDate
+    }
 
     $targetRowCount = $targetLastRow - $targetStartRow + 1
-    $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
-    $openOrderOutput = New-Object 'object[,]' $targetRowCount, 4
-    $confirmationOutput = New-Object 'object[,]' $targetRowCount, 5
-    $stockWeeklyOutput = New-Object 'object[,]' $targetRowCount, 2
+    if (-not $SkipConfirmation) {
+        $confirmationOutput = New-Object 'object[,]' $targetRowCount, 5
+    }
+    if (-not $ConfirmationOnly) {
+        $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
+        $openOrderOutput = New-Object 'object[,]' $targetRowCount, 4
+        $stockWeeklyOutput = New-Object 'object[,]' $targetRowCount, 2
+    }
 
     for ($outputRow = 0; $outputRow -lt $targetRowCount; $outputRow++) {
-        $productId = Get-NormalizedKey `
-            -Value $targetProductValues[($outputRow + 1), 1]
+        if (-not $ConfirmationOnly) {
+            $productId = Get-NormalizedKey `
+                -Value $targetProductValues[($outputRow + 1), 1]
 
-        for ($monthIndex = 0; $monthIndex -lt 3; $monthIndex++) {
-            $monthValue = [double]0
-            if ($monthIndex -lt $monthly.MonthOrder.Count) {
-                $month = $monthly.MonthOrder[$monthIndex]
-                $monthValue = Get-MapValue `
-                    -Map $monthly.MonthMaps[$month] `
-                    -Key $productId
+            for ($monthIndex = 0; $monthIndex -lt 3; $monthIndex++) {
+                $monthValue = [double]0
+                if ($monthIndex -lt $monthly.MonthOrder.Count) {
+                    $month = $monthly.MonthOrder[$monthIndex]
+                    $monthValue = Get-MapValue `
+                        -Map $monthly.MonthMaps[$month] `
+                        -Key $productId
+                }
+                $monthlyOutput[$outputRow, $monthIndex] = $monthValue
             }
-            $monthlyOutput[$outputRow, $monthIndex] = $monthValue
+
+            $openOrderOutput[$outputRow, 0] =
+                Get-MapValue -Map $columnS -Key $productId
+            $openOrderOutput[$outputRow, 1] =
+                Get-MapValue -Map $columnT -Key $productId
+            $openOrderOutput[$outputRow, 2] =
+                Get-MapValue -Map $columnU -Key $productId
+            $openOrderOutput[$outputRow, 3] =
+                Get-MapValue -Map $columnV -Key $productId
+            $stockWeeklyOutput[$outputRow, 0] =
+                Get-MapValue -Map $inventory -Key $productId
+            $stockWeeklyOutput[$outputRow, 1] =
+                Get-MapValue -Map $weekly.Totals -Key $productId
         }
 
-        $openOrderOutput[$outputRow, 0] =
-            Get-MapValue -Map $columnS -Key $productId
-        $openOrderOutput[$outputRow, 1] =
-            Get-MapValue -Map $columnT -Key $productId
-        $openOrderOutput[$outputRow, 2] =
-            Get-MapValue -Map $columnU -Key $productId
-        $openOrderOutput[$outputRow, 3] =
-            Get-MapValue -Map $columnV -Key $productId
-        $stockWeeklyOutput[$outputRow, 0] =
-            Get-MapValue -Map $inventory -Key $productId
-        $stockWeeklyOutput[$outputRow, 1] =
-            Get-MapValue -Map $weekly.Totals -Key $productId
-        $confirmationProductId = Get-NormalizedIdentifier `
-            -Value $targetProductValues[($outputRow + 1), 1]
-        for ($weekIndex = 0; $weekIndex -lt 5; $weekIndex++) {
-            $confirmationOutput[$outputRow, $weekIndex] = Get-MapValue `
-                -Map $confirmationWeekly.WeekMaps[$weekIndex] `
-                -Key $confirmationProductId
+        if (-not $SkipConfirmation) {
+            $confirmationProductId = Get-NormalizedIdentifier `
+                -Value $targetProductValues[($outputRow + 1), 1]
+            for ($weekIndex = 0; $weekIndex -lt 5; $weekIndex++) {
+                $confirmationOutput[$outputRow, $weekIndex] = Get-MapValue `
+                    -Map $confirmationWeekly.WeekMaps[$weekIndex] `
+                    -Key $confirmationProductId
+            }
         }
     }
 
-    $monthlyTarget = $targetSheet.Range(
-        "O${targetStartRow}:Q${targetLastRow}"
-    )
-    $openOrderTarget = $targetSheet.Range(
-        "S${targetStartRow}:V${targetLastRow}"
-    )
-    $confirmationTarget = $targetSheet.Range(
-        "X${targetStartRow}:AB${targetLastRow}"
-    )
-    $futureConfirmationTarget = $targetSheet.Range(
-        "Y${targetStartRow}:AB${targetLastRow}"
-    )
-    $confirmationHeaderTarget = $targetSheet.Range('Y3:AB3')
-    $confirmationHeaderOutput = New-Object 'object[,]' 1, 4
-    for ($headerIndex = 0; $headerIndex -lt 4; $headerIndex++) {
-        if ($headerIndex -lt $confirmationWeekly.FutureFridays.Count) {
-            $confirmationHeaderOutput[0, $headerIndex] =
-                $confirmationWeekly.FutureFridays[$headerIndex].ToOADate()
-        }
-        else {
-            $confirmationHeaderOutput[0, $headerIndex] = $null
+    if (-not $ConfirmationOnly) {
+        $monthlyTarget = $targetSheet.Range(
+            "O${targetStartRow}:Q${targetLastRow}"
+        )
+        $openOrderTarget = $targetSheet.Range(
+            "S${targetStartRow}:V${targetLastRow}"
+        )
+        $stockWeeklyTarget = $targetSheet.Range(
+            "AL${targetStartRow}:AM${targetLastRow}"
+        )
+    }
+    if (-not $SkipConfirmation) {
+        $confirmationTarget = $targetSheet.Range(
+            "X${targetStartRow}:AB${targetLastRow}"
+        )
+        $futureConfirmationTarget = $targetSheet.Range(
+            "Y${targetStartRow}:AB${targetLastRow}"
+        )
+        $confirmationHeaderTarget = $targetSheet.Range('Y3:AB3')
+        $confirmationHeaderOutput = New-Object 'object[,]' 1, 4
+        for ($headerIndex = 0; $headerIndex -lt 4; $headerIndex++) {
+            if ($headerIndex -lt $confirmationWeekly.FutureFridays.Count) {
+                $confirmationHeaderOutput[0, $headerIndex] =
+                    $confirmationWeekly.FutureFridays[$headerIndex].ToOADate()
+            }
+            else {
+                $confirmationHeaderOutput[0, $headerIndex] = $null
+            }
         }
     }
-    $stockWeeklyTarget = $targetSheet.Range(
-        "AL${targetStartRow}:AM${targetLastRow}"
-    )
     $rowRuns = Get-RowVisibilityRuns `
         -Worksheet $targetSheet `
         -StartRow $targetStartRow `
         -EndRow $targetLastRow
 
-    Set-RangeValues `
-        -Worksheet $targetSheet `
-        -Range $monthlyTarget `
-        -Values $monthlyOutput `
-        -RowRuns $rowRuns
-    Set-RangeValues `
-        -Worksheet $targetSheet `
-        -Range $openOrderTarget `
-        -Values $openOrderOutput `
-        -RowRuns $rowRuns
-    Set-RangeValues `
-        -Worksheet $targetSheet `
-        -Range $confirmationTarget `
-        -Values $confirmationOutput `
-        -RowRuns $rowRuns
-    $futureConfirmationTarget.NumberFormat = '#,##0;-#,##0;;@'
-    $confirmationHeaderTarget.Value2 = $confirmationHeaderOutput
-    Set-RangeValues `
-        -Worksheet $targetSheet `
-        -Range $stockWeeklyTarget `
-        -Values $stockWeeklyOutput `
-        -RowRuns $rowRuns
+    if (-not $ConfirmationOnly) {
+        Set-RangeValues `
+            -Worksheet $targetSheet `
+            -Range $monthlyTarget `
+            -Values $monthlyOutput `
+            -RowRuns $rowRuns
+        Set-RangeValues `
+            -Worksheet $targetSheet `
+            -Range $openOrderTarget `
+            -Values $openOrderOutput `
+            -RowRuns $rowRuns
+    }
+    if (-not $SkipConfirmation) {
+        Set-RangeValues `
+            -Worksheet $targetSheet `
+            -Range $confirmationTarget `
+            -Values $confirmationOutput `
+            -RowRuns $rowRuns
+        $futureConfirmationTarget.NumberFormat = '#,##0;-#,##0;;@'
+        $confirmationHeaderTarget.Value2 = $confirmationHeaderOutput
+    }
+    if (-not $ConfirmationOnly) {
+        Set-RangeValues `
+            -Worksheet $targetSheet `
+            -Range $stockWeeklyTarget `
+            -Values $stockWeeklyOutput `
+            -RowRuns $rowRuns
+    }
 
     $destinationWorkbook.Save()
 
-    Assert-ArrayValues `
-        -Actual $monthlyTarget.Value2 `
-        -Expected $monthlyOutput `
-        -RangeName 'Supportability O:Q'
-    Assert-ArrayValues `
-        -Actual $openOrderTarget.Value2 `
-        -Expected $openOrderOutput `
-        -RangeName 'Supportability S:V'
-    Assert-ArrayValues `
-        -Actual $confirmationTarget.Value2 `
-        -Expected $confirmationOutput `
-        -RangeName 'Supportability X:AB'
-    Assert-ArrayValues `
-        -Actual $confirmationHeaderTarget.Value2 `
-        -Expected $confirmationHeaderOutput `
-        -RangeName 'Supportability Y3:AB3'
-    Assert-ArrayValues `
-        -Actual $stockWeeklyTarget.Value2 `
-        -Expected $stockWeeklyOutput `
-        -RangeName 'Supportability AL:AM'
+    if (-not $ConfirmationOnly) {
+        Assert-ArrayValues `
+            -Actual $monthlyTarget.Value2 `
+            -Expected $monthlyOutput `
+            -RangeName 'Supportability O:Q'
+        Assert-ArrayValues `
+            -Actual $openOrderTarget.Value2 `
+            -Expected $openOrderOutput `
+            -RangeName 'Supportability S:V'
+    }
+    if (-not $SkipConfirmation) {
+        Assert-ArrayValues `
+            -Actual $confirmationTarget.Value2 `
+            -Expected $confirmationOutput `
+            -RangeName 'Supportability X:AB'
+        Assert-ArrayValues `
+            -Actual $confirmationHeaderTarget.Value2 `
+            -Expected $confirmationHeaderOutput `
+            -RangeName 'Supportability Y3:AB3'
+    }
+    if (-not $ConfirmationOnly) {
+        Assert-ArrayValues `
+            -Actual $stockWeeklyTarget.Value2 `
+            -Expected $stockWeeklyOutput `
+            -RangeName 'Supportability AL:AM'
+    }
 
     $refreshSucceeded = $true
 }
@@ -1561,19 +1611,39 @@ finally {
 }
 
 if ($refreshSucceeded) {
-    Write-Host (
-        'CMMR supportability report refresh succeeded. ' +
-        "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
-        "$($weekly.EndDate.ToString('yyyy-MM-dd')); confirmation buckets: " +
-        "$($confirmationWeekly.StartDate.ToString('yyyy-MM-dd')) current week" +
-        $(if ($confirmationWeekly.FutureFridays.Count -gt 0) {
-            '; future Fridays: ' +
-            (($confirmationWeekly.FutureFridays | ForEach-Object {
-                $_.ToString('yyyy-MM-dd')
-            }) -join ', ') + '.'
-        }
-        else {
-            '; no future weeks with AD data.'
-        })
-    )
+    if (-not $SkipConfirmation) {
+        $confirmationSummary =
+            "$($confirmationWeekly.StartDate.ToString('yyyy-MM-dd')) current week" +
+            $(if ($confirmationWeekly.FutureFridays.Count -gt 0) {
+                '; future Fridays: ' +
+                (($confirmationWeekly.FutureFridays | ForEach-Object {
+                    $_.ToString('yyyy-MM-dd')
+                }) -join ', ') + '.'
+            }
+            else {
+                '; no future weeks with AD data.'
+            })
+    }
+    if ($ConfirmationOnly) {
+        Write-Host (
+            'CMMR confirmation X:AB refresh succeeded. ' +
+            "Confirmation buckets: $confirmationSummary"
+        )
+    }
+    elseif ($SkipConfirmation) {
+        Write-Host (
+            'CMMR supportability report refresh succeeded without ' +
+            'confirmation X:AB. ' +
+            "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
+            "$($weekly.EndDate.ToString('yyyy-MM-dd'))."
+        )
+    }
+    else {
+        Write-Host (
+            'CMMR supportability report refresh succeeded. ' +
+            "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
+            "$($weekly.EndDate.ToString('yyyy-MM-dd')); confirmation buckets: " +
+            $confirmationSummary
+        )
+    }
 }

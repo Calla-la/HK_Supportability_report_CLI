@@ -14,6 +14,18 @@ When the user says "Run CMMR supportability report refresh":
 6. If processing or validation fails, report the exact failure and do not
    report success.
 
+When the user asks to refresh only CMMR confirmation columns `X:AB`, run:
+
+`powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrConfirmation.ps1 -SourceWorkbookPath "<source-path>" -DestinationWorkbookPath "<destination-path>"`
+
+This entry point uses the authoritative CMMR implementation in confirmation-only
+mode. It refreshes the IB PO source data, then updates and validates only
+`Supportability!X:AB` and `Y3:AB3`.
+
+The combined `Update-SupportabilityReports.ps1` entry point invokes the CMMR
+implementation with `-SkipConfirmation`, so it does not read, calculate,
+format, write, or validate `Supportability!X:AB` or `Y3:AB3`.
+
 ## Workbooks
 
 - Source: `1_HK CMMR+RT Order and Supply data CLI.xlsx`
