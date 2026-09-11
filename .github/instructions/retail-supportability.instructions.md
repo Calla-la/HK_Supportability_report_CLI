@@ -11,6 +11,16 @@ When the user says
 
 3. Do not create an alternative implementation.
 4. Report success only when both refreshes and their validations succeed.
+5. The combined entry point skips CMMR confirmation columns `X:AB` and
+   `Y3:AB3`; refresh those separately with
+   `scripts/Update-CmmrConfirmation.ps1`.
+6. Before refreshing either report, the combined entry point automatically:
+   - Loads `HK ALL OOR.XLSX` from the source workbook's directory.
+   - Preserves `HK all OOR!A:D`, clears `E:CA`, and writes the replacement
+     workbook's first worksheet `A:BW` to `E:CA`.
+   - Refreshes the `HK OOR Pivot` PivotTables.
+   - Does not explicitly modify any other PivotTable filters; the approved
+     `DeliveryDateDetail` exceptions are `Z3 = 0` and `Z4 = 5395802`.
 
 The Retail implementation is `scripts/Update-RetailSupportability.ps1`.
 
@@ -60,6 +70,7 @@ Match `Retail INV` Material to destination Product ID:
 - Source: `DDR pivot!AI:CZ`.
 - Sum Delivery Qty for Sold-to Party `5395802`.
 - Write the result to destination column `BT`.
+- Format `BT` as a zero-decimal number and display numeric zero as blank.
 - Monday through Thursday: use the previous Monday through Sunday.
 - Friday through Sunday: use the current Monday through Friday.
 
@@ -69,7 +80,8 @@ Match `Retail INV` Material to destination Product ID:
   from row 4 onward, plus headers `AU3:BA3`.
 - Do not change `AT3`.
 - Preserve all existing cell formatting and number formats, except set
-  populated `AU3:BA3` headers to `mm/dd`.
+  populated `AU3:BA3` headers to `mm/dd` and format `BT` as a zero-decimal
+  number with numeric zero displayed as blank.
 - Do not change any other values, formulas, conditional formatting, widths,
   heights, grouping, filters, sorting, outlines, freeze panes, PivotTables,
   charts, shapes, links, names, or workbook structure.

@@ -14,11 +14,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+$hkAllOorPath = Join-Path `
+    -Path (Split-Path -Parent $SourceWorkbookPath) `
+    -ChildPath 'HK ALL OOR.XLSX'
+
+& (Join-Path $scriptDirectory 'Update-HkAllOor.ps1') `
+    -TargetWorkbookPath $SourceWorkbookPath `
+    -ReplacementWorkbookPath $hkAllOorPath
 
 & (Join-Path $scriptDirectory 'Update-CmmrSupportability.ps1') `
     -SourceWorkbookPath $SourceWorkbookPath `
     -DestinationWorkbookPath $CmmrDestinationWorkbookPath `
-    -AsOfDate $AsOfDate
+    -AsOfDate $AsOfDate `
+    -SkipConfirmation
 
 & (Join-Path $scriptDirectory 'Update-RetailSupportability.ps1') `
     -SourceWorkbookPath $SourceWorkbookPath `

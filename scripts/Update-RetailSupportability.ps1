@@ -907,6 +907,11 @@ public static class RetailExcelProcessResolver
     Set-RangeValues -Worksheet $targetSheet -Range $weeklyActualTarget `
         -Values $weeklyActualOutput -RowRuns $rowRuns `
         -Context 'write Retail Supportability BT'
+    Invoke-ExcelComRetry `
+        -Context 'format Retail Supportability BT' `
+        -Operation {
+            $weeklyActualTarget.NumberFormat = '#,##0;-#,##0;;@'
+        }
     Set-RangeValues -Worksheet $targetSheet -Range $inventoryHTarget `
         -Values $inventoryHOutput -RowRuns $rowRuns `
         -Context 'write Retail Supportability CF'
@@ -949,6 +954,9 @@ public static class RetailExcelProcessResolver
         -Expected $openOrderOutput -RangeName 'Supportability AS:BA'
     Assert-ArrayValues -Actual $weeklyActualTarget.Value2 `
         -Expected $weeklyActualOutput -RangeName 'Supportability BT'
+    if ([string]$weeklyActualTarget.NumberFormat -ne '#,##0;-#,##0;;@') {
+        throw 'Supportability BT number format validation failed.'
+    }
     Assert-ArrayValues -Actual $inventoryHTarget.Value2 `
         -Expected $inventoryHOutput -RangeName 'Supportability CF'
     Assert-ArrayValues -Actual $inventoryITarget.Value2 `
