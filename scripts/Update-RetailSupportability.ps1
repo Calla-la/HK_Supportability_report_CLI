@@ -4,11 +4,12 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$SourceWorkbookPath,
 
-    [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$DestinationWorkbookPath,
+    [string]$DestinationWorkbookPath = $SourceWorkbookPath,
 
-    [datetime]$AsOfDate = (Get-Date)
+    [datetime]$AsOfDate = (Get-Date),
+
+    [string]$DestinationSheetName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -739,6 +740,18 @@ foreach ($path in @($SourceWorkbookPath, $DestinationWorkbookPath)) {
 
 $sourcePath = (Resolve-Path -LiteralPath $SourceWorkbookPath).Path
 $destinationPath = (Resolve-Path -LiteralPath $DestinationWorkbookPath).Path
+$sameWorkbook = $sourcePath -eq $destinationPath
+if (-not $PSBoundParameters.ContainsKey('DestinationSheetName')) {
+    $DestinationSheetName = if ($sameWorkbook) {
+        'Retail supportability'
+    }
+    else {
+        'Supportability'
+    }
+}
+if ([string]::IsNullOrWhiteSpace($DestinationSheetName)) {
+    throw 'DestinationSheetName cannot be blank.'
+}
 $excel = $null
 $sourceWorkbook = $null
 $destinationWorkbook = $null
@@ -783,8 +796,13 @@ public static class RetailExcelProcessResolver
     $excel.AutomationSecurity = 3
     $excel.ScreenUpdating = $false
 
-    $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, $true)
-    $destinationWorkbook = $excel.Workbooks.Open($destinationPath, 0, $false)
+    $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, (-not $sameWorkbook))
+    if ($sameWorkbook) {
+        $destinationWorkbook = $sourceWorkbook
+    }
+    else {
+        $destinationWorkbook = $excel.Workbooks.Open($destinationPath, 0, $false)
+    }
     if ([bool]$destinationWorkbook.ReadOnly) {
         throw "Destination workbook opened as read-only: $destinationPath"
     }
@@ -792,7 +810,7 @@ public static class RetailExcelProcessResolver
     $oorSheet = $sourceWorkbook.Worksheets.Item('HK OOR Pivot')
     $ddrSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
     $inventorySheet = $sourceWorkbook.Worksheets.Item('Retail INV')
-    $targetSheet = $destinationWorkbook.Worksheets.Item('Supportability')
+    $targetSheet = $destinationWorkbook.Worksheets.Item($DestinationSheetName)
 
     $oorLastRow = [math]::Max(
         (Get-LastDataRow -Worksheet $oorSheet -Column 16),
@@ -814,7 +832,7 @@ public static class RetailExcelProcessResolver
 
     $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 16
     if ($targetLastRow -lt $targetStartRow) {
-        throw 'The destination Supportability sheet has no product rows.'
+        throw "The destination '$DestinationSheetName' sheet has no product rows."
     }
     $productRange = $targetSheet.Range("P${targetStartRow}:P${targetLastRow}")
     $productValues = $productRange.Value2
@@ -944,25 +962,31 @@ public static class RetailExcelProcessResolver
             }
     }
 
+    Invoke-ExcelComRetry -Context 'restore Automatic calculation' -Operation {
+        $excel.Calculation = -4105
+    }
     Invoke-ExcelComRetry -Context 'save Retail destination workbook' -Operation {
         $destinationWorkbook.Save()
     }
+    if ($excel.Calculation -ne -4105) {
+        throw 'Excel calculation mode is not Automatic after saving the destination workbook.'
+    }
 
     Assert-ArrayValues -Actual $monthlyTarget.Value2 `
-        -Expected $monthlyOutput -RangeName 'Supportability U:W'
+        -Expected $monthlyOutput -RangeName "$DestinationSheetName U:W"
     Assert-ArrayValues -Actual $openOrderTarget.Value2 `
-        -Expected $openOrderOutput -RangeName 'Supportability AS:BA'
+        -Expected $openOrderOutput -RangeName "$DestinationSheetName AS:BA"
     Assert-ArrayValues -Actual $weeklyActualTarget.Value2 `
-        -Expected $weeklyActualOutput -RangeName 'Supportability BT'
+        -Expected $weeklyActualOutput -RangeName "$DestinationSheetName BT"
     if ([string]$weeklyActualTarget.NumberFormat -ne '#,##0;-#,##0;;@') {
-        throw 'Supportability BT number format validation failed.'
+        throw "$DestinationSheetName BT number format validation failed."
     }
     Assert-ArrayValues -Actual $inventoryHTarget.Value2 `
-        -Expected $inventoryHOutput -RangeName 'Supportability CF'
+        -Expected $inventoryHOutput -RangeName "$DestinationSheetName CF"
     Assert-ArrayValues -Actual $inventoryITarget.Value2 `
-        -Expected $inventoryIOutput -RangeName 'Supportability CH'
+        -Expected $inventoryIOutput -RangeName "$DestinationSheetName CH"
     Assert-ArrayValues -Actual $inventoryJTarget.Value2 `
-        -Expected $inventoryJOutput -RangeName 'Supportability CJ'
+        -Expected $inventoryJOutput -RangeName "$DestinationSheetName CJ"
 
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
@@ -998,6 +1022,9 @@ public static class RetailExcelProcessResolver
     $refreshSucceeded = $true
 }
 finally {
+    if ($sameWorkbook -and $null -ne $destinationWorkbook) {
+        $sourceWorkbook = $null
+    }
     if ($null -ne $destinationWorkbook) {
         try { $destinationWorkbook.Close($false) }
         catch { Write-Warning "Failed to close destination: $($_.Exception.Message)" }
@@ -1007,8 +1034,17 @@ finally {
         catch { Write-Warning "Failed to close source: $($_.Exception.Message)" }
     }
     if ($null -ne $excel) {
-        try { $excel.Quit() }
-        catch { Write-Warning "Failed to quit Excel: $($_.Exception.Message)" }
+        for ($quitAttempt = 1; $quitAttempt -le 2; $quitAttempt++) {
+            try { $excel.Quit() }
+            catch {
+                Write-Warning "Failed to quit Excel (attempt $quitAttempt): $($_.Exception.Message)"
+            }
+            if ($null -eq $excelProcess -or
+                $excelProcess.HasExited -or
+                $excelProcess.WaitForExit(5000)) {
+                break
+            }
+        }
     }
     foreach ($object in @(
         $inventoryJTarget, $inventoryITarget, $inventoryHTarget,
@@ -1028,9 +1064,7 @@ finally {
         try {
             if (-not $excelProcess.HasExited -and
                 -not $excelProcess.WaitForExit(5000)) {
-                $excelProcess.Kill()
-                $excelProcess.WaitForExit()
-                Write-Warning "Terminated the script-owned Excel process $excelProcessId."
+                Write-Warning "Excel process $excelProcessId is still running after graceful quit retries; it was not force-terminated."
             }
         }
         finally { $excelProcess.Dispose() }

@@ -6,7 +6,7 @@ When the user says "Run CMMR supportability report refresh":
    implementation.
 2. Run only:
 
-   `powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrSupportability.ps1 -SourceWorkbookPath "<source-path>" -DestinationWorkbookPath "<destination-path>"`
+   `powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrSupportability.ps1 -SourceWorkbookPath "<source-path>"`
 
 3. Do not create an alternative implementation.
 4. Do not perform unnecessary previews, repeated reads, or intermediate checks.
@@ -14,25 +14,37 @@ When the user says "Run CMMR supportability report refresh":
 6. If processing or validation fails, report the exact failure and do not
    report success.
 
-When the user asks to refresh only CMMR confirmation columns `X:AB`, run:
+When the user asks to refresh only CMMR confirmation columns `X:AA`, run:
 
-`powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrConfirmation.ps1 -SourceWorkbookPath "<source-path>" -DestinationWorkbookPath "<destination-path>"`
+`powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrConfirmation.ps1 -SourceWorkbookPath "<source-path>"`
 
 This entry point uses the authoritative CMMR implementation in confirmation-only
 mode. It refreshes the IB PO source data, then updates and validates only
-`Supportability!X:AB` and `Y3:AB3`.
+`CMMR Supportability!X:AA` and `X3:AA3`.
 
 The combined `Update-SupportabilityReports.ps1` entry point invokes the CMMR
 implementation with `-SkipConfirmation`, so it does not read, calculate,
-format, write, or validate `Supportability!X:AB` or `Y3:AB3`.
+format, write, or validate `CMMR Supportability!X:AA` or `X3:AA3`.
 
 ## Workbooks
 
 - Source: `1_HK CMMR+RT Order and Supply data CLI.xlsx`
 - IB PO source: `HK ALL IB PO.XLSX`, in the same directory as the source
   workbook
-- Destination: `CMMR Supportability Report_CLI+++++.xlsx`
-- Destination worksheet: `Supportability`
+- Destination: the source workbook itself
+- Destination worksheet: `CMMR Supportability`
+- Price-list dependency: original `PL 0922` was copied as `CMMR PL` in the
+  unified workbook. Related CMMR formulas reference `CMMR PL` locally; do not
+  recopy or refresh the price list during report refreshes.
+- The original `CMMR Supportability Report_CLI+++++.xlsx` is retained
+  unchanged, not used as the default destination.
+- For an explicitly requested legacy separate-workbook refresh,
+  `-DestinationWorkbookPath "<destination-path>"` remains supported and
+  defaults to worksheet `Supportability`. `-DestinationSheetName` can
+  explicitly select a worksheet.
+- When source and destination are the same file, open it once read/write.
+  Never open a second read-only copy or close/release the same COM workbook
+  twice. For separate files, keep the source read-only as before.
 
 ## Task 0 - Refresh IB PO source data
 
@@ -45,7 +57,8 @@ Before calculating the supportability report:
 4. Replace the `IB PO` worksheet in the source workbook with the processed
    worksheet.
 5. Refresh the `IB PO pvt` PivotTable and save the source workbook.
-6. Reopen the source workbook read-only before running the remaining tasks.
+6. Reopen the source workbook read/write when it is also the destination;
+   otherwise reopen it read-only before running the remaining tasks.
 
 ## Product matching
 
@@ -83,14 +96,14 @@ Write values to destination columns `S:V`:
 
 - Match `CMMR INV` column `A` Material to destination column `L` Product ID.
 - Copy the corresponding numeric value from `CMMR INV` column `J` to
-  destination column `AL`.
+  destination column `AM`.
 
 ## Task 4 - Dynamic Weekly Actual SI
 
 - Source: `DDR pivot!AI:CZ`.
 - Match Material to destination column `L` Product ID.
 - Sum Delivery Qty for Sold-to Party `5395800`, `5395801`, and `5395799`.
-- Write the result to destination column `AM`.
+- Write the result to destination column `AN`.
 - Calendar weeks run Monday through Sunday.
 - On Monday through Thursday, use the previous complete calendar week.
 - On Friday, Saturday, or Sunday, use Monday through Thursday of the current
@@ -98,7 +111,7 @@ Write values to destination columns `S:V`:
 
 ## Task 5 - CMMR Confirmation Weekly Buckets
 
-Update destination worksheet `Supportability`, columns `X:AB`, beginning on
+Update destination worksheet `CMMR Supportability`, columns `X:AA`, beginning on
 row 4.
 
 ### Source and matching
@@ -118,15 +131,14 @@ row 4.
 
 Calendar weeks run Monday through Sunday based on the refresh date:
 
-- `X`: current calendar week.
-- `Y:AB`: the earliest four future calendar weeks that contain eligible AD
+- `X:AA`: the earliest four future calendar weeks that contain eligible AD
   data, in chronological order.
 - Skip future calendar weeks with no eligible AD data and shift later
   non-empty weeks left.
-- Write each selected future week's Friday to `Y3:AB3`.
-- Clear unused `Y3:AB3` cells and write numeric zero to the corresponding
+- Write each selected future week's Friday to `X3:AA3`.
+- Clear unused `X3:AA3` cells and write numeric zero to the corresponding
   unused data columns.
-- Store missing AD results in `Y:AB` as numeric zero, but apply a number
+- Store missing AD results in `X:AA` as numeric zero, but apply a number
   format that displays zero values as blank.
 
 ### IB PO confirmation
@@ -140,21 +152,7 @@ Use source worksheet `IB PO pvt` for confirmation:
   aggregated AD quantity.
 - Ignore leading zeros when matching numeric identifiers.
 
-For destination column `X` only:
-
-1. Use only valid `Date to release` dates in the current Monday-through-Sunday
-   calendar week. Exclude blank, `TBD`, and `Delivered`.
-2. For each SKU, sum column `AD` across the entire current week and across
-   eligible Sold-to Nbr `5395800`, `5395799`, and `5395801`.
-3. Compare that weekly AD total with:
-   - the same SKU's `CMMR INV` column `I` value; and
-   - the same SKU's `IB PO pvt` `Still to be delivered (qty)` for the
-     current week's Friday `IB PO RDD`.
-4. Write the weekly AD total to `X` when either comparison value is greater
-   than or equal to the AD total.
-5. When both conditions pass, count the weekly AD total only once.
-
-For destination columns `Y:AB`:
+For destination columns `X:AA`:
 
 1. Exclude the current calendar week.
 2. For each future calendar week and SKU, sum column `AD` across eligible
@@ -166,22 +164,27 @@ For destination columns `Y:AB`:
 5. Select the earliest four future weeks containing eligible AD data.
 
 Sum all qualifying SKU/date quantities within each week and write numeric
-values to `X:AB`. Write numeric `0` when no qualifying quantity exists.
+values to `X:AA`. Write numeric `0` when no qualifying quantity exists.
 
 ## Protection requirements
 
 - Do not change row 1.
-- Only update destination cells in columns `O:Q`, `S:V`, `X:AB`, `AL`, and
-  `AM`, beginning on row 4, plus headers `Y3:AB3`.
-- Do not modify destination columns `AC:AH`.
+- Only update destination cells in columns `O:Q`, `S:V`, `X:AA`, `AM`, and
+  `AN`, beginning on row 4, plus headers `X3:AA3`.
+- Do not modify destination columns `AB:AG`.
 - Write values only and preserve existing formatting.
-- The only formatting exception is the `Y:AB` number format required to
+- The only formatting exception is the `X:AA` number format required to
   display underlying numeric zero values as blank.
 - Do not change any other formulas, values, cell formatting, number formats,
   conditional formatting, column widths, row heights, hidden/grouped state,
   filters, sorting, outlines, freeze panes, PivotTables, charts, shapes,
   links, names, or workbook structure.
-- Open the source workbook read-only.
+- Open a separate source workbook read-only; open the unified source and
+  destination workbook once read/write.
 - Save the destination workbook once.
 - Validate all written values after saving.
+- Restore Automatic calculation before each workbook save and validate that
+  it remains Automatic afterward.
+- Retry graceful Excel Quit twice; report any remaining script-owned Excel
+  PID after COM release without force-terminating it.
 - Retry rejected Excel COM calls for at most 10 seconds per call.

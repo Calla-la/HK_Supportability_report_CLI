@@ -1,0 +1,28 @@
+Run scripts from the main branch
+================================
+
+1. Open PowerShell and switch to the repository:
+
+cd "C:\Users\v-capan\HK_Supportability_report_CLI"
+
+2. Switch to main and download the latest version:
+
+git switch main
+git pull --ff-only origin main
+
+3. Close all Microsoft Excel windows.
+
+4. Run the CMMR-RT inventory and system confirmation update:
+
+powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrRt.ps1 `
+  -WorkbookPath "C:\Users\v-capan\OneDrive - Microsoft\disk C\HK ACCN COM online\3_CLI\1_HK CMMR+RT Order and Supply data CLI.xlsx"
+
+5. Run the CMMR and Retail supportability report refresh:
+
+powershell -ExecutionPolicy Bypass -File .\scripts\Update-SupportabilityReports.ps1 `
+  -SourceWorkbookPath "C:\Users\v-capan\OneDrive - Microsoft\disk C\HK ACCN COM online\3_CLI\1_HK CMMR+RT Order and Supply data CLI.xlsx"
+
+The same workbook contains both destination sheets:
+  CMMR Supportability
+  Retail supportability
+The original separate report workbooks are retained and are not refreshed.

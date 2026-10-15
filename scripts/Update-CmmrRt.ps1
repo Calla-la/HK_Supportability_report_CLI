@@ -331,9 +331,7 @@ function Register-ExcelComRetryFilter {
     if (-not ('ExcelComRetryFilter' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Threading;
 
 [ComImport]
 [Guid("00000016-0000-0000-C000-000000000046")]
@@ -444,50 +442,6 @@ public sealed class ExcelComRetryFilter : IOleMessageFilter
     }
 }
 
-public sealed class ExcelShutdownWatchdog : IDisposable
-{
-    private readonly Process process;
-    private readonly Timer timer;
-    private int terminated;
-
-    private ExcelShutdownWatchdog(Process process, int timeoutMilliseconds)
-    {
-        this.process = process;
-        timer = new Timer(OnTimeout, null, timeoutMilliseconds, Timeout.Infinite);
-    }
-
-    public bool Terminated
-    {
-        get { return Interlocked.CompareExchange(ref terminated, 0, 0) == 1; }
-    }
-
-    public static ExcelShutdownWatchdog Start(
-        Process process,
-        int timeoutMilliseconds)
-    {
-        return new ExcelShutdownWatchdog(process, timeoutMilliseconds);
-    }
-
-    private void OnTimeout(object state)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill();
-                Interlocked.Exchange(ref terminated, 1);
-            }
-        }
-        catch (InvalidOperationException)
-        {
-        }
-    }
-
-    public void Dispose()
-    {
-        timer.Dispose();
-    }
-}
 '@
     }
 
@@ -1358,6 +1312,8 @@ try {
         -LightGreen $lightGreen `
         -LightBlue $lightBlue
 
+    $excel.Calculation = -4105
+
     Save-WorkbookWithRetry `
         -Workbook $workbook `
         -WorkbookName (Split-Path -Leaf $resolvedWorkbookPath)
@@ -1436,17 +1392,13 @@ try {
         -Workbook $workbook `
         -WorksheetName 'RT confirmation'
 
+    if ($excel.Calculation -ne -4105) {
+        throw 'Excel calculation mode is not Automatic after saving.'
+    }
+
     Write-Host 'CMMR-RT inventory, system confirmation, and confirmation-sheet copy update succeeded.'
 }
 finally {
-    $shutdownWatchdog = $null
-    if ($null -ne $excelProcess -and -not $excelProcess.HasExited) {
-        $shutdownWatchdog = [ExcelShutdownWatchdog]::Start(
-            $excelProcess,
-            15000
-        )
-    }
-
     if ($null -ne $rtOorWorkbook) {
         try {
             $rtOorWorkbook.Close($false)
@@ -1472,11 +1424,18 @@ finally {
         }
     }
     if ($null -ne $excel) {
-        try {
-            $excel.Quit()
-        }
-        catch {
-            Write-Warning "Failed to quit Excel cleanly: $($_.Exception.Message)"
+        for ($quitAttempt = 1; $quitAttempt -le 2; $quitAttempt++) {
+            try {
+                $excel.Quit()
+            }
+            catch {
+                Write-Warning "Failed to quit Excel cleanly (attempt $quitAttempt): $($_.Exception.Message)"
+            }
+            if ($null -eq $excelProcess -or
+                $excelProcess.HasExited -or
+                $excelProcess.WaitForExit(5000)) {
+                break
+            }
         }
     }
 
@@ -1506,20 +1465,12 @@ finally {
         try {
             if (-not $excelProcess.HasExited -and
                 -not $excelProcess.WaitForExit(5000)) {
-                $excelProcess.Kill()
-                $excelProcess.WaitForExit()
-                Write-Warning "Terminated the unresponsive Excel process $excelProcessId."
+                Write-Warning "Excel process $excelProcessId is still running after graceful quit retries; it was not force-terminated."
             }
         }
         catch [System.InvalidOperationException] {
         }
         finally {
-            if ($null -ne $shutdownWatchdog) {
-                if ($shutdownWatchdog.Terminated) {
-                    Write-Warning "The Excel shutdown watchdog terminated process $excelProcessId."
-                }
-                $shutdownWatchdog.Dispose()
-            }
             $excelProcess.Dispose()
         }
     }

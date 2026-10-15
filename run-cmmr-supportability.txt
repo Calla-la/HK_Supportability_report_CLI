@@ -1,0 +1,1 @@
+Set-Location "C:\Users\v-capan\HK_Supportability_report_CLI"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\Users\v-capan\HK_Supportability_report_CLI\scripts\Update-CmmrSupportability.ps1" -SourceWorkbookPath "C:\Users\v-capan\OneDrive - Microsoft\disk C\HK ACCN COM online\3_CLI\1_HK CMMR+RT Order and Supply data CLI.xlsx"

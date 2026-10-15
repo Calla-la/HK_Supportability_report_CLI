@@ -35,8 +35,8 @@ When the user says "Run the CMMR-RT inventory and system confirmation update":
 - Retry only Excel COM save failures, up to three attempts per workbook, and
   report the exact workbook name if all attempts fail.
 - Retry rejected Excel COM calls for at most 10 seconds per call.
-- Terminate only the Excel process created by the script if it remains
-  unresponsive after the script's close and quit attempts.
+- Retry graceful Excel Quit twice. If the script's Excel process remains
+  running after COM release, report its PID without force-terminating it.
 
 ## Process CMMR_INV_RAW_DATA.XLS
 
@@ -99,6 +99,9 @@ Apply the same filtering, aggregation, output columns, calculations, and formatt
 Save the completed workbook to the original path supplied through the `-WorkbookPath` parameter.
 
 Do not create another output workbook.
+
+Restore Excel calculation mode to Automatic before saving any target workbook,
+and validate that it remains Automatic after the final saves.
 
 ## Final validation
 

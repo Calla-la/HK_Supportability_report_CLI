@@ -4,15 +4,16 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$SourceWorkbookPath,
 
-    [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$DestinationWorkbookPath,
+    [string]$DestinationWorkbookPath = $SourceWorkbookPath,
 
     [datetime]$AsOfDate = (Get-Date),
 
     [switch]$ConfirmationOnly,
 
-    [switch]$SkipConfirmation
+    [switch]$SkipConfirmation,
+
+    [string]$DestinationSheetName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -565,33 +566,6 @@ function Get-InventoryTotals {
     return ,$totals
 }
 
-function Get-InventoryAvailableSupply {
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowNull()]
-        [object[,]]$Values,
-
-        [Parameter(Mandatory = $true)]
-        [int]$LastRow
-    )
-
-    $totals = [System.Collections.Hashtable]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    for ($rowIndex = 2; $rowIndex -le $LastRow; $rowIndex++) {
-        $material = Get-NormalizedIdentifier -Value $Values[$rowIndex, 1]
-        if ([string]::IsNullOrWhiteSpace($material)) {
-            continue
-        }
-
-        $totals[$material] = ConvertTo-Number `
-            -Value $Values[$rowIndex, 9] `
-            -Context "CMMR INV row $rowIndex, column I"
-    }
-
-    return ,$totals
-}
-
 function Get-CurrentCalendarMonday {
     param(
         [Parameter(Mandatory = $true)]
@@ -721,9 +695,6 @@ function Get-ConfirmationWeeklyBuckets {
         [System.Collections.Hashtable]$IbPoTotals,
 
         [Parameter(Mandatory = $true)]
-        [System.Collections.Hashtable]$AvailableSupply,
-
-        [Parameter(Mandatory = $true)]
         [datetime]$RunDate
     )
 
@@ -782,12 +753,6 @@ function Get-ConfirmationWeeklyBuckets {
         $skuByKey[$key] = $sku
     }
 
-    $currentWeekMap = [System.Collections.Hashtable]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    $currentWeekTotals = [System.Collections.Hashtable]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
     $futureWeekTotals = @{}
     foreach ($entry in $confirmationTotals.GetEnumerator()) {
         $key = [string]$entry.Key
@@ -798,10 +763,6 @@ function Get-ConfirmationWeeklyBuckets {
         $weekFriday = $weekMonday.AddDays(4)
 
         if ($weekMonday -eq $currentMonday) {
-            Add-ToMap `
-                -Map $currentWeekTotals `
-                -Key $sku `
-                -Value $quantity
             continue
         }
 
@@ -813,21 +774,6 @@ function Get-ConfirmationWeeklyBuckets {
                 )
         }
         Add-ToMap -Map $futureWeekTotals[$weekKey] -Key $sku -Value $quantity
-    }
-
-    $currentFriday = $currentMonday.AddDays(4)
-    foreach ($entry in $currentWeekTotals.GetEnumerator()) {
-        $sku = [string]$entry.Key
-        $quantity = [double]$entry.Value
-        $available = Get-MapValue -Map $AvailableSupply -Key $sku
-        $ibPoFridayKey = Get-SkuDateKey -Sku $sku -Date $currentFriday
-        $ibPoFridayQuantity = Get-MapValue `
-            -Map $IbPoTotals `
-            -Key $ibPoFridayKey
-        if ($available -ge $quantity -or
-            $ibPoFridayQuantity -ge $quantity) {
-            $currentWeekMap[$sku] = $quantity
-        }
     }
 
     $futureFridays = @(
@@ -842,7 +788,7 @@ function Get-ConfirmationWeeklyBuckets {
             Sort-Object |
             Select-Object -First 4
     )
-    $weekMaps = @($currentWeekMap)
+    $weekMaps = @()
     foreach ($futureFriday in $futureFridays) {
         $futureWeekMap = [System.Collections.Hashtable]::new(
             [System.StringComparer]::OrdinalIgnoreCase
@@ -859,7 +805,7 @@ function Get-ConfirmationWeeklyBuckets {
         }
         $weekMaps += $futureWeekMap
     }
-    while ($weekMaps.Count -lt 5) {
+    while ($weekMaps.Count -lt 4) {
         $weekMaps += [System.Collections.Hashtable]::new(
             [System.StringComparer]::OrdinalIgnoreCase
         )
@@ -1103,6 +1049,18 @@ foreach ($path in @($SourceWorkbookPath, $DestinationWorkbookPath)) {
 
 $sourcePath = (Resolve-Path -LiteralPath $SourceWorkbookPath).Path
 $destinationPath = (Resolve-Path -LiteralPath $DestinationWorkbookPath).Path
+$sameWorkbook = $sourcePath -eq $destinationPath
+if (-not $PSBoundParameters.ContainsKey('DestinationSheetName')) {
+    $DestinationSheetName = if ($sameWorkbook) {
+        'CMMR Supportability'
+    }
+    else {
+        'Supportability'
+    }
+}
+if ([string]::IsNullOrWhiteSpace($DestinationSheetName)) {
+    throw 'DestinationSheetName cannot be blank.'
+}
 if (-not $SkipConfirmation) {
     $ibPoSourcePath = Join-Path `
         -Path (Split-Path -Parent $sourcePath) `
@@ -1222,7 +1180,11 @@ public static class ExcelProcessResolver
             throw 'Failed to refresh the IB PO pvt PivotTable.'
         }
 
+        $excel.Calculation = -4105
         $sourceWorkbook.Save()
+        if ($excel.Calculation -ne -4105) {
+            throw 'Excel calculation mode is not Automatic after saving the source workbook.'
+        }
         $sourceWorkbook.Close($false)
         $ibPoSourceWorkbook.Close($false)
         foreach ($comObject in @(
@@ -1247,14 +1209,19 @@ public static class ExcelProcessResolver
         $ibPoSourceWorkbook = $null
     }
 
-    $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, $true)
-    $destinationWorkbook = $excel.Workbooks.Open($destinationPath, 0, $false)
+    $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, (-not $sameWorkbook))
+    if ($sameWorkbook) {
+        $destinationWorkbook = $sourceWorkbook
+    }
+    else {
+        $destinationWorkbook = $excel.Workbooks.Open($destinationPath, 0, $false)
+    }
     if ([bool]$destinationWorkbook.ReadOnly) {
         throw "Destination workbook opened as read-only: $destinationPath"
     }
 
     $inventorySheet = $sourceWorkbook.Worksheets.Item('CMMR INV')
-    $targetSheet = $destinationWorkbook.Worksheets.Item('Supportability')
+    $targetSheet = $destinationWorkbook.Worksheets.Item($DestinationSheetName)
 
     if (-not $SkipConfirmation) {
         $confirmationSheet =
@@ -1315,7 +1282,7 @@ public static class ExcelProcessResolver
 
     $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 12
     if ($targetLastRow -lt $targetStartRow) {
-        throw 'The destination Supportability sheet has no product rows.'
+        throw "The destination '$DestinationSheetName' sheet has no product rows."
     }
     $targetProductRange = $targetSheet.Range(
         "L${targetStartRow}:L${targetLastRow}"
@@ -1342,9 +1309,9 @@ public static class ExcelProcessResolver
         $columnU = Get-PivotBlockTotals `
             -Values $oorValues `
             -LastRow $oorLastRow `
-            -SkuColumn 16 `
+            -SkuColumn 15 `
             -SoldToHeaderRow 8 `
-            -FirstValueColumn 17 `
+            -FirstValueColumn 16 `
             -LastValueColumn 22 `
             -IncludedSoldTo @('5395800', '5395799', '5395801')
         $columnV = Get-PivotBlockTotals `
@@ -1365,21 +1332,17 @@ public static class ExcelProcessResolver
             -LastRow $inventoryLastRow
     }
     if (-not $SkipConfirmation) {
-        $availableSupply = Get-InventoryAvailableSupply `
-            -Values $inventoryValues `
-            -LastRow $inventoryLastRow
         $ibPoTotals = Get-IbPoConfirmationTotals -Values $ibPoValues
         $confirmationWeekly = Get-ConfirmationWeeklyBuckets `
             -Values $confirmationValues `
             -LastRow $confirmationLastRow `
             -IbPoTotals $ibPoTotals `
-            -AvailableSupply $availableSupply `
             -RunDate $AsOfDate
     }
 
     $targetRowCount = $targetLastRow - $targetStartRow + 1
     if (-not $SkipConfirmation) {
-        $confirmationOutput = New-Object 'object[,]' $targetRowCount, 5
+        $confirmationOutput = New-Object 'object[,]' $targetRowCount, 4
     }
     if (-not $ConfirmationOnly) {
         $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
@@ -1420,7 +1383,7 @@ public static class ExcelProcessResolver
         if (-not $SkipConfirmation) {
             $confirmationProductId = Get-NormalizedIdentifier `
                 -Value $targetProductValues[($outputRow + 1), 1]
-            for ($weekIndex = 0; $weekIndex -lt 5; $weekIndex++) {
+            for ($weekIndex = 0; $weekIndex -lt 4; $weekIndex++) {
                 $confirmationOutput[$outputRow, $weekIndex] = Get-MapValue `
                     -Map $confirmationWeekly.WeekMaps[$weekIndex] `
                     -Key $confirmationProductId
@@ -1436,17 +1399,17 @@ public static class ExcelProcessResolver
             "S${targetStartRow}:V${targetLastRow}"
         )
         $stockWeeklyTarget = $targetSheet.Range(
-            "AL${targetStartRow}:AM${targetLastRow}"
+            "AM${targetStartRow}:AN${targetLastRow}"
         )
     }
     if (-not $SkipConfirmation) {
         $confirmationTarget = $targetSheet.Range(
-            "X${targetStartRow}:AB${targetLastRow}"
+            "X${targetStartRow}:AA${targetLastRow}"
         )
         $futureConfirmationTarget = $targetSheet.Range(
-            "Y${targetStartRow}:AB${targetLastRow}"
+            "X${targetStartRow}:AA${targetLastRow}"
         )
-        $confirmationHeaderTarget = $targetSheet.Range('Y3:AB3')
+        $confirmationHeaderTarget = $targetSheet.Range('X3:AA3')
         $confirmationHeaderOutput = New-Object 'object[,]' 1, 4
         for ($headerIndex = 0; $headerIndex -lt 4; $headerIndex++) {
             if ($headerIndex -lt $confirmationWeekly.FutureFridays.Count) {
@@ -1492,38 +1455,45 @@ public static class ExcelProcessResolver
             -RowRuns $rowRuns
     }
 
+    $excel.Calculation = -4105
     $destinationWorkbook.Save()
+    if ($excel.Calculation -ne -4105) {
+        throw 'Excel calculation mode is not Automatic after saving the destination workbook.'
+    }
 
     if (-not $ConfirmationOnly) {
         Assert-ArrayValues `
             -Actual $monthlyTarget.Value2 `
             -Expected $monthlyOutput `
-            -RangeName 'Supportability O:Q'
+            -RangeName "$DestinationSheetName O:Q"
         Assert-ArrayValues `
             -Actual $openOrderTarget.Value2 `
             -Expected $openOrderOutput `
-            -RangeName 'Supportability S:V'
+            -RangeName "$DestinationSheetName S:V"
     }
     if (-not $SkipConfirmation) {
         Assert-ArrayValues `
             -Actual $confirmationTarget.Value2 `
             -Expected $confirmationOutput `
-            -RangeName 'Supportability X:AB'
+            -RangeName "$DestinationSheetName X:AA"
         Assert-ArrayValues `
             -Actual $confirmationHeaderTarget.Value2 `
             -Expected $confirmationHeaderOutput `
-            -RangeName 'Supportability Y3:AB3'
+            -RangeName "$DestinationSheetName X3:AA3"
     }
     if (-not $ConfirmationOnly) {
         Assert-ArrayValues `
             -Actual $stockWeeklyTarget.Value2 `
             -Expected $stockWeeklyOutput `
-            -RangeName 'Supportability AL:AM'
+            -RangeName "$DestinationSheetName AM:AN"
     }
 
     $refreshSucceeded = $true
 }
 finally {
+    if ($sameWorkbook -and $null -ne $destinationWorkbook) {
+        $sourceWorkbook = $null
+    }
     if ($null -ne $destinationWorkbook) {
         try {
             $destinationWorkbook.Close($false)
@@ -1549,11 +1519,18 @@ finally {
         }
     }
     if ($null -ne $excel) {
-        try {
-            $excel.Quit()
-        }
-        catch {
-            Write-Warning "Failed to quit Excel: $($_.Exception.Message)"
+        for ($quitAttempt = 1; $quitAttempt -le 2; $quitAttempt++) {
+            try {
+                $excel.Quit()
+            }
+            catch {
+                Write-Warning "Failed to quit Excel (attempt $quitAttempt): $($_.Exception.Message)"
+            }
+            if ($null -eq $excelProcess -or
+                $excelProcess.HasExited -or
+                $excelProcess.WaitForExit(5000)) {
+                break
+            }
         }
     }
 
@@ -1599,9 +1576,7 @@ finally {
         try {
             if (-not $excelProcess.HasExited -and
                 -not $excelProcess.WaitForExit(5000)) {
-                $excelProcess.Kill()
-                $excelProcess.WaitForExit()
-                Write-Warning "Terminated the script-owned Excel process $excelProcessId."
+                Write-Warning "Excel process $excelProcessId is still running after graceful quit retries; it was not force-terminated."
             }
         }
         finally {
@@ -1613,9 +1588,8 @@ finally {
 if ($refreshSucceeded) {
     if (-not $SkipConfirmation) {
         $confirmationSummary =
-            "$($confirmationWeekly.StartDate.ToString('yyyy-MM-dd')) current week" +
             $(if ($confirmationWeekly.FutureFridays.Count -gt 0) {
-                '; future Fridays: ' +
+                'future Fridays: ' +
                 (($confirmationWeekly.FutureFridays | ForEach-Object {
                     $_.ToString('yyyy-MM-dd')
                 }) -join ', ') + '.'
@@ -1626,14 +1600,14 @@ if ($refreshSucceeded) {
     }
     if ($ConfirmationOnly) {
         Write-Host (
-            'CMMR confirmation X:AB refresh succeeded. ' +
+            'CMMR confirmation X:AA refresh succeeded. ' +
             "Confirmation buckets: $confirmationSummary"
         )
     }
     elseif ($SkipConfirmation) {
         Write-Host (
             'CMMR supportability report refresh succeeded without ' +
-            'confirmation X:AB. ' +
+            'confirmation X:AA. ' +
             "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
             "$($weekly.EndDate.ToString('yyyy-MM-dd'))."
         )

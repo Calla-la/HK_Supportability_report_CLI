@@ -3,24 +3,17 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SourceWorkbookPath,
 
-    [Parameter(Mandatory = $true)]
-    [string]$CmmrDestinationWorkbookPath,
+    [ValidateNotNullOrEmpty()]
+    [string]$CmmrDestinationWorkbookPath = $SourceWorkbookPath,
 
-    [Parameter(Mandatory = $true)]
-    [string]$RetailDestinationWorkbookPath,
+    [ValidateNotNullOrEmpty()]
+    [string]$RetailDestinationWorkbookPath = $SourceWorkbookPath,
 
     [datetime]$AsOfDate = (Get-Date)
 )
 
 $ErrorActionPreference = 'Stop'
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$hkAllOorPath = Join-Path `
-    -Path (Split-Path -Parent $SourceWorkbookPath) `
-    -ChildPath 'HK ALL OOR.XLSX'
-
-& (Join-Path $scriptDirectory 'Update-HkAllOor.ps1') `
-    -TargetWorkbookPath $SourceWorkbookPath `
-    -ReplacementWorkbookPath $hkAllOorPath
 
 & (Join-Path $scriptDirectory 'Update-CmmrSupportability.ps1') `
     -SourceWorkbookPath $SourceWorkbookPath `
