@@ -1050,6 +1050,9 @@ foreach ($path in @($SourceWorkbookPath, $DestinationWorkbookPath)) {
 $sourcePath = (Resolve-Path -LiteralPath $SourceWorkbookPath).Path
 $destinationPath = (Resolve-Path -LiteralPath $DestinationWorkbookPath).Path
 $sameWorkbook = $sourcePath -eq $destinationPath
+$monthlyColumns = if ($sameWorkbook) { @('N', 'P') } else { @('O', 'Q') }
+$openOrderColumns = if ($sameWorkbook) { @('R', 'U') } else { @('S', 'V') }
+$stockWeeklyColumns = if ($sameWorkbook) { @('AK', 'AL') } else { @('AM', 'AN') }
 if (-not $PSBoundParameters.ContainsKey('DestinationSheetName')) {
     $DestinationSheetName = if ($sameWorkbook) {
         'CMMR Supportability'
@@ -1393,13 +1396,13 @@ public static class ExcelProcessResolver
 
     if (-not $ConfirmationOnly) {
         $monthlyTarget = $targetSheet.Range(
-            "O${targetStartRow}:Q${targetLastRow}"
+            "$($monthlyColumns[0])${targetStartRow}:$($monthlyColumns[1])${targetLastRow}"
         )
         $openOrderTarget = $targetSheet.Range(
-            "S${targetStartRow}:V${targetLastRow}"
+            "$($openOrderColumns[0])${targetStartRow}:$($openOrderColumns[1])${targetLastRow}"
         )
         $stockWeeklyTarget = $targetSheet.Range(
-            "AM${targetStartRow}:AN${targetLastRow}"
+            "$($stockWeeklyColumns[0])${targetStartRow}:$($stockWeeklyColumns[1])${targetLastRow}"
         )
     }
     if (-not $SkipConfirmation) {
@@ -1465,11 +1468,11 @@ public static class ExcelProcessResolver
         Assert-ArrayValues `
             -Actual $monthlyTarget.Value2 `
             -Expected $monthlyOutput `
-            -RangeName "$DestinationSheetName O:Q"
+            -RangeName "$DestinationSheetName $($monthlyColumns -join ':')"
         Assert-ArrayValues `
             -Actual $openOrderTarget.Value2 `
             -Expected $openOrderOutput `
-            -RangeName "$DestinationSheetName S:V"
+            -RangeName "$DestinationSheetName $($openOrderColumns -join ':')"
     }
     if (-not $SkipConfirmation) {
         Assert-ArrayValues `
@@ -1485,7 +1488,7 @@ public static class ExcelProcessResolver
         Assert-ArrayValues `
             -Actual $stockWeeklyTarget.Value2 `
             -Expected $stockWeeklyOutput `
-            -RangeName "$DestinationSheetName AM:AN"
+            -RangeName "$DestinationSheetName $($stockWeeklyColumns -join ':')"
     }
 
     $refreshSucceeded = $true

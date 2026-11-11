@@ -38,6 +38,11 @@ format, write, or validate `CMMR Supportability!X:AA` or `X3:AA3`.
   recopy or refresh the price list during report refreshes.
 - The original `CMMR Supportability Report_CLI+++++.xlsx` is retained
   unchanged, not used as the default destination.
+- The unified workbook uses monthly actuals `N:P`, open orders `R:U`,
+  inventory `AK`, and weekly actuals `AL`. Do not write to `V` or `AM`
+  and any columns to its right.
+- Explicit separate legacy destinations retain monthly actuals `O:Q`,
+  open orders `S:V`, inventory `AM`, and weekly actuals `AN`.
 - For an explicitly requested legacy separate-workbook refresh,
   `-DestinationWorkbookPath "<destination-path>"` remains supported and
   defaults to worksheet `Supportability`. `-DestinationSheetName` can
@@ -69,15 +74,15 @@ Before calculating the supportability report:
 
 ## Task 1 - Open orders
 
-Write values to destination columns `S:V`:
+Write values to unified destination columns `R:U`:
 
-- `S`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `5395800`
+- `R`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `5395800`
   and `5395801` by SKU.
-- `T`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `5395799`
+- `S`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `5395799`
   by SKU.
-- `U`: From `HK OOR Pivot!N:V`, sum values for SoldTo Nbr `5395800`,
+- `T`: From `HK OOR Pivot!N:V`, sum values for SoldTo Nbr `5395800`,
   `5395799`, and `5395801` by SKU.
-- `V`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `1001089`
+- `U`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `1001089`
   by SKU.
 
 ## Task 2 - Monthly Actual SI
@@ -87,8 +92,8 @@ Write values to destination columns `S:V`:
   order.
 - For each Material and month, sum Delivery Qty for Sold-to Party `5395800`,
   `5395801`, and `5395799`.
-- Write the first three displayed months to destination columns `O`, `P`,
-  and `Q`.
+- Write the first three displayed months to unified destination columns
+  `N`, `O`, and `P` (October, November, December for the current quarter).
 - If fewer than three months are displayed, write numeric `0` for each
   missing month.
 
@@ -96,14 +101,14 @@ Write values to destination columns `S:V`:
 
 - Match `CMMR INV` column `A` Material to destination column `L` Product ID.
 - Copy the corresponding numeric value from `CMMR INV` column `J` to
-  destination column `AM`.
+  unified destination column `AK`.
 
 ## Task 4 - Dynamic Weekly Actual SI
 
 - Source: `DDR pivot!AI:CZ`.
 - Match Material to destination column `L` Product ID.
 - Sum Delivery Qty for Sold-to Party `5395800`, `5395801`, and `5395799`.
-- Write the result to destination column `AN`.
+- Write the result to unified destination column `AL`.
 - Calendar weeks run Monday through Sunday.
 - On Monday through Thursday, use the previous complete calendar week.
 - On Friday, Saturday, or Sunday, use Monday through Thursday of the current
@@ -169,8 +174,10 @@ values to `X:AA`. Write numeric `0` when no qualifying quantity exists.
 ## Protection requirements
 
 - Do not change row 1.
-- Only update destination cells in columns `O:Q`, `S:V`, `X:AA`, `AM`, and
-  `AN`, beginning on row 4, plus headers `X3:AA3`.
+- Only update unified destination cells in columns `N:P`, `R:U`, `X:AA`,
+  and `AK:AL`, beginning on row 4, plus headers `X3:AA3`.
+- Preserve `V` and `AM` and all columns to its right; do not clear their
+  existing contents or delete columns.
 - Do not modify destination columns `AB:AG`.
 - Write values only and preserve existing formatting.
 - The only formatting exception is the `X:AA` number format required to
