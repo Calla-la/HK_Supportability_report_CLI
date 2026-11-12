@@ -497,29 +497,6 @@ function Get-WeeklyActuals {
     }
 }
 
-function Get-RetailInventory {
-    param(
-        [Parameter(Mandatory = $true)][AllowNull()][object[,]]$Values,
-        [Parameter(Mandatory = $true)][int]$LastRow
-    )
-    $maps = @(
-        (New-Map)
-        (New-Map)
-        (New-Map)
-    )
-    for ($row = 2; $row -le $LastRow; $row++) {
-        $material = Get-Key -Value $Values[$row, 1]
-        if ([string]::IsNullOrWhiteSpace($material)) { continue }
-        $maps[0][$material] = ConvertTo-Number `
-            -Value $Values[$row, 8] -Context "Retail INV H$row"
-        $maps[1][$material] = ConvertTo-Number `
-            -Value $Values[$row, 9] -Context "Retail INV I$row"
-        $maps[2][$material] = ConvertTo-Number `
-            -Value $Values[$row, 10] -Context "Retail INV J$row"
-    }
-    return ,$maps
-}
-
 function Get-LastDataRow {
     param(
         [Parameter(Mandatory = $true)][object]$Worksheet,
@@ -690,6 +667,103 @@ function Set-RangeValues {
     }
 }
 
+function Set-RetailStockLookup {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][object]$SourceWorksheet,
+        [Parameter(Mandatory = $true)][object]$ProductValues,
+        [Parameter(Mandatory = $true)][int]$StartRow
+    )
+
+    $header = $null
+    $sourceRange = $null
+    try {
+        $header = $SourceWorksheet.Cells.Item(1, 1)
+        if ((Get-Key -Value $header.Value2) -ne 'MATERIAL') {
+            throw 'Retail INV layout is incorrect: expected Material in A1.'
+        }
+        $lastRow = Get-LastDataRow -Worksheet $SourceWorksheet -Column 1
+        if ($lastRow -lt 2) { throw 'Retail INV has no inventory rows.' }
+        $sourceRange = $SourceWorksheet.Range("A1:J$lastRow")
+        $values = $sourceRange.Value2
+        $stock = [Collections.Hashtable]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        for ($row = 2; $row -le $lastRow; $row++) {
+            $key = [string]$values[$row, 1]
+            if ([string]::IsNullOrWhiteSpace($key) -or $stock.ContainsKey($key)) {
+                continue
+            }
+            $stock[$key] = ConvertTo-Number -Value $values[$row, 10] `
+                -Context "Retail INV J$row"
+        }
+    }
+    finally {
+        Release-ComObject -ComObject $sourceRange
+        Release-ComObject -ComObject $header
+    }
+
+    $checks = [Collections.Generic.List[object]]::new()
+    $rowCount = if ($ProductValues -is [array]) {
+        $ProductValues.GetLength(0)
+    }
+    else { 1 }
+    for ($index = 0; $index -lt $rowCount; $index++) {
+        $key = if ($ProductValues -is [array]) {
+            [string]$ProductValues[($index + 1), 1]
+        }
+        else { [string]$ProductValues }
+        if ([string]::IsNullOrWhiteSpace($key)) { continue }
+        $row = $StartRow + $index
+        # INDIRECT survives the inventory sheet's deletion and recreation.
+        $formula = '=XLOOKUP(N{0},INDIRECT("''Retail INV''!A:A"),INDIRECT("''Retail INV''!J:J"),0)' -f $row
+        $cell = $null
+        try {
+            $cell = $Worksheet.Cells.Item($row, 54)
+            if ($cell.MergeCells -ne $false) {
+                throw "Retail supportability!BB$row is merged."
+            }
+            $checks.Add([pscustomobject]@{
+                Row = $row
+                Formula = $formula
+                Expected = if ($stock.ContainsKey($key)) { $stock[$key] }
+                    else { [double]0 }
+                NumberFormat = $cell.NumberFormat
+            })
+            Invoke-ExcelComRetry -Context "write Retail BB$row formula" `
+                -Operation { $cell.Formula2 = $formula }
+        }
+        finally { Release-ComObject -ComObject $cell }
+    }
+    return $checks.ToArray()
+}
+
+function Assert-RetailStockLookup {
+    param(
+        [Parameter(Mandatory = $true)][object]$Worksheet,
+        [Parameter(Mandatory = $true)][object[]]$Checks
+    )
+
+    foreach ($check in $Checks) {
+        $cell = $null
+        try {
+            $cell = $Worksheet.Cells.Item($check.Row, 54)
+            if ([string]$cell.Formula2 -cne $check.Formula) {
+                throw "Retail BB$($check.Row) formula validation failed."
+            }
+            $actual = ConvertTo-Number -Value $cell.Value2 `
+                -Context "Retail BB$($check.Row) validation"
+            if ([math]::Abs($actual - $check.Expected) -gt 0.000001) {
+                throw "Retail BB$($check.Row) value validation failed: expected $($check.Expected), found $actual."
+            }
+            if (-not [object]::Equals($cell.NumberFormat, $check.NumberFormat)) {
+                throw "Retail BB$($check.Row) number format changed."
+            }
+        }
+        finally { Release-ComObject -ComObject $cell }
+    }
+}
+
 function Assert-ArrayValues {
     param(
         [Parameter(Mandatory = $true)][AllowNull()][array]$Actual,
@@ -752,6 +826,32 @@ if (-not $PSBoundParameters.ContainsKey('DestinationSheetName')) {
 if ([string]::IsNullOrWhiteSpace($DestinationSheetName)) {
     throw 'DestinationSheetName cannot be blank.'
 }
+$targetLayout = if ($sameWorkbook) {
+    @{
+        Product = 'N'
+        ProductColumn = 14
+        MonthlyStart = 'P'
+        MonthlyEnd = 'R'
+        OpenOrderStart = 'AC'
+        OpenOrderEnd = 'AK'
+        FutureHeaderColumn = 31
+        WeeklyActual = 'BA'
+    }
+}
+else {
+    @{
+        Product = 'P'
+        ProductColumn = 16
+        MonthlyStart = 'U'
+        MonthlyEnd = 'W'
+        OpenOrderStart = 'AS'
+        OpenOrderEnd = 'BA'
+        FutureHeaderColumn = 47
+        WeeklyActual = 'BT'
+    }
+}
+$monthlyColumns = "$($targetLayout.MonthlyStart):$($targetLayout.MonthlyEnd)"
+$openOrderColumns = "$($targetLayout.OpenOrderStart):$($targetLayout.OpenOrderEnd)"
 $excel = $null
 $sourceWorkbook = $null
 $destinationWorkbook = $null
@@ -809,8 +909,19 @@ public static class RetailExcelProcessResolver
 
     $oorSheet = $sourceWorkbook.Worksheets.Item('HK OOR Pivot')
     $ddrSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
-    $inventorySheet = $sourceWorkbook.Worksheets.Item('Retail INV')
     $targetSheet = $destinationWorkbook.Worksheets.Item($DestinationSheetName)
+    $productHeader = $null
+    try {
+        $productHeader = $targetSheet.Cells.Item(
+            3, $targetLayout.ProductColumn
+        )
+        if ((Get-Key -Value $productHeader.Value2) -ne 'PRODUCT ID') {
+            throw "The destination '$DestinationSheetName' layout is incorrect: expected Product ID in $($targetLayout.Product)3."
+        }
+    }
+    finally {
+        Release-ComObject -ComObject $productHeader
+    }
 
     $oorLastRow = [math]::Max(
         (Get-LastDataRow -Worksheet $oorSheet -Column 16),
@@ -826,15 +937,14 @@ public static class RetailExcelProcessResolver
     $ddrRange = $ddrSheet.Range("A1:CZ$ddrLastRow")
     $ddrValues = $ddrRange.Value2
 
-    $inventoryLastRow = Get-LastDataRow -Worksheet $inventorySheet -Column 1
-    $inventoryRange = $inventorySheet.Range("A1:J$inventoryLastRow")
-    $inventoryValues = $inventoryRange.Value2
-
-    $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 16
+    $targetLastRow = Get-LastDataRow -Worksheet $targetSheet `
+        -Column $targetLayout.ProductColumn
     if ($targetLastRow -lt $targetStartRow) {
         throw "The destination '$DestinationSheetName' sheet has no product rows."
     }
-    $productRange = $targetSheet.Range("P${targetStartRow}:P${targetLastRow}")
+    $productRange = $targetSheet.Range(
+        "$($targetLayout.Product)${targetStartRow}:$($targetLayout.Product)${targetLastRow}"
+    )
     $productValues = $productRange.Value2
 
     $dsOpenOrder = Get-OpenOrderTotal `
@@ -845,17 +955,10 @@ public static class RetailExcelProcessResolver
         -Values $ddrValues -LastRow $ddrLastRow
     $weeklyActual = Get-WeeklyActuals `
         -Values $ddrValues -LastRow $ddrLastRow -RunDate $AsOfDate
-    $inventory = Get-RetailInventory `
-        -Values $inventoryValues -LastRow $inventoryLastRow
-
     $targetRowCount = $targetLastRow - $targetStartRow + 1
     $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
     $openOrderOutput = New-Object 'object[,]' $targetRowCount, 9
     $weeklyActualOutput = New-Object 'object[,]' $targetRowCount, 1
-    $inventoryHOutput = New-Object 'object[,]' $targetRowCount, 1
-    $inventoryIOutput = New-Object 'object[,]' $targetRowCount, 1
-    $inventoryJOutput = New-Object 'object[,]' $targetRowCount, 1
-
     for ($outputRow = 0; $outputRow -lt $targetRowCount; $outputRow++) {
         $productId = Get-Key -Value $productValues[($outputRow + 1), 1]
         for ($index = 0; $index -lt 3; $index++) {
@@ -885,31 +988,16 @@ public static class RetailExcelProcessResolver
 
         $weeklyActualOutput[$outputRow, 0] =
             Get-MapValue -Map $weeklyActual.Values -Key $productId
-        $inventoryHOutput[$outputRow, 0] =
-            Get-MapValue -Map $inventory[0] -Key $productId
-        $inventoryIOutput[$outputRow, 0] =
-            Get-MapValue -Map $inventory[1] -Key $productId
-        $inventoryJOutput[$outputRow, 0] =
-            Get-MapValue -Map $inventory[2] -Key $productId
     }
 
     $monthlyTarget = $targetSheet.Range(
-        "U${targetStartRow}:W${targetLastRow}"
+        "$($targetLayout.MonthlyStart)${targetStartRow}:$($targetLayout.MonthlyEnd)${targetLastRow}"
     )
     $openOrderTarget = $targetSheet.Range(
-        "AS${targetStartRow}:BA${targetLastRow}"
+        "$($targetLayout.OpenOrderStart)${targetStartRow}:$($targetLayout.OpenOrderEnd)${targetLastRow}"
     )
     $weeklyActualTarget = $targetSheet.Range(
-        "BT${targetStartRow}:BT${targetLastRow}"
-    )
-    $inventoryHTarget = $targetSheet.Range(
-        "CF${targetStartRow}:CF${targetLastRow}"
-    )
-    $inventoryITarget = $targetSheet.Range(
-        "CH${targetStartRow}:CH${targetLastRow}"
-    )
-    $inventoryJTarget = $targetSheet.Range(
-        "CJ${targetStartRow}:CJ${targetLastRow}"
+        "$($targetLayout.WeeklyActual)${targetStartRow}:$($targetLayout.WeeklyActual)${targetLastRow}"
     )
     $rowRuns = Get-RowVisibilityRuns `
         -Worksheet $targetSheet `
@@ -918,35 +1006,27 @@ public static class RetailExcelProcessResolver
 
     Set-RangeValues -Worksheet $targetSheet -Range $monthlyTarget `
         -Values $monthlyOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability U:W'
+        -Context "write Retail Supportability $monthlyColumns"
     Set-RangeValues -Worksheet $targetSheet -Range $openOrderTarget `
         -Values $openOrderOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability AS:BA'
+        -Context "write Retail Supportability $openOrderColumns"
     Set-RangeValues -Worksheet $targetSheet -Range $weeklyActualTarget `
         -Values $weeklyActualOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability BT'
+        -Context "write Retail Supportability $($targetLayout.WeeklyActual)"
     Invoke-ExcelComRetry `
-        -Context 'format Retail Supportability BT' `
+        -Context "format Retail Supportability $($targetLayout.WeeklyActual)" `
         -Operation {
             $weeklyActualTarget.NumberFormat = '#,##0;-#,##0;;@'
         }
-    Set-RangeValues -Worksheet $targetSheet -Range $inventoryHTarget `
-        -Values $inventoryHOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability CF'
-    Set-RangeValues -Worksheet $targetSheet -Range $inventoryITarget `
-        -Values $inventoryIOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability CH'
-    Set-RangeValues -Worksheet $targetSheet -Range $inventoryJTarget `
-        -Values $inventoryJOutput -RowRuns $rowRuns `
-        -Context 'write Retail Supportability CJ'
-
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
-            -Context "write future header column $(47 + $index)" `
+            -Context "write future header column $($targetLayout.FutureHeaderColumn + $index)" `
             -Operation {
                 $header = $null
                 try {
-                    $header = $targetSheet.Cells.Item(3, 47 + $index)
+                    $header = $targetSheet.Cells.Item(
+                        3, $targetLayout.FutureHeaderColumn + $index
+                    )
                     if ($index -lt $weeklyOpenOrder.Future.Count) {
                         $header.Value2 =
                             $weeklyOpenOrder.Future[$index].Friday.ToOADate()
@@ -962,8 +1042,22 @@ public static class RetailExcelProcessResolver
             }
     }
 
+    $stockLookups = @()
+    if ($sameWorkbook) {
+        $stockSheet = $null
+        try {
+            $stockSheet = $sourceWorkbook.Worksheets.Item('Retail INV')
+            $stockLookups = @(Set-RetailStockLookup -Worksheet $targetSheet `
+                -SourceWorksheet $stockSheet -ProductValues $productValues `
+                -StartRow $targetStartRow)
+        }
+        finally { Release-ComObject -ComObject $stockSheet }
+    }
     Invoke-ExcelComRetry -Context 'restore Automatic calculation' -Operation {
         $excel.Calculation = -4105
+    }
+    if ($stockLookups.Count) {
+        Assert-RetailStockLookup -Worksheet $targetSheet -Checks $stockLookups
     }
     Invoke-ExcelComRetry -Context 'save Retail destination workbook' -Operation {
         $destinationWorkbook.Save()
@@ -971,46 +1065,44 @@ public static class RetailExcelProcessResolver
     if ($excel.Calculation -ne -4105) {
         throw 'Excel calculation mode is not Automatic after saving the destination workbook.'
     }
+    if ($stockLookups.Count) {
+        Assert-RetailStockLookup -Worksheet $targetSheet -Checks $stockLookups
+    }
 
     Assert-ArrayValues -Actual $monthlyTarget.Value2 `
-        -Expected $monthlyOutput -RangeName "$DestinationSheetName U:W"
+        -Expected $monthlyOutput -RangeName "$DestinationSheetName $monthlyColumns"
     Assert-ArrayValues -Actual $openOrderTarget.Value2 `
-        -Expected $openOrderOutput -RangeName "$DestinationSheetName AS:BA"
+        -Expected $openOrderOutput -RangeName "$DestinationSheetName $openOrderColumns"
     Assert-ArrayValues -Actual $weeklyActualTarget.Value2 `
-        -Expected $weeklyActualOutput -RangeName "$DestinationSheetName BT"
+        -Expected $weeklyActualOutput -RangeName "$DestinationSheetName $($targetLayout.WeeklyActual)"
     if ([string]$weeklyActualTarget.NumberFormat -ne '#,##0;-#,##0;;@') {
-        throw "$DestinationSheetName BT number format validation failed."
+        throw "$DestinationSheetName $($targetLayout.WeeklyActual) number format validation failed."
     }
-    Assert-ArrayValues -Actual $inventoryHTarget.Value2 `
-        -Expected $inventoryHOutput -RangeName "$DestinationSheetName CF"
-    Assert-ArrayValues -Actual $inventoryITarget.Value2 `
-        -Expected $inventoryIOutput -RangeName "$DestinationSheetName CH"
-    Assert-ArrayValues -Actual $inventoryJTarget.Value2 `
-        -Expected $inventoryJOutput -RangeName "$DestinationSheetName CJ"
-
     for ($index = 0; $index -lt 7; $index++) {
         Invoke-ExcelComRetry `
-            -Context "validate future header column $(47 + $index)" `
+            -Context "validate future header column $($targetLayout.FutureHeaderColumn + $index)" `
             -Operation {
                 $header = $null
                 try {
-                    $header = $targetSheet.Cells.Item(3, 47 + $index)
+                    $header = $targetSheet.Cells.Item(
+                        3, $targetLayout.FutureHeaderColumn + $index
+                    )
                     if ($index -lt $weeklyOpenOrder.Future.Count) {
                         $expectedDate = $weeklyOpenOrder.Future[$index].Friday
                         $actualDate = ConvertTo-Date `
                             -Value $header.Value2 `
-                            -Context "future weekly header column $(47 + $index)"
+                            -Context "future weekly header column $($targetLayout.FutureHeaderColumn + $index)"
                         if ($actualDate -ne $expectedDate.Date) {
-                            throw "Future weekly header column $(47 + $index) has an incorrect date."
+                            throw "Future weekly header column $($targetLayout.FutureHeaderColumn + $index) has an incorrect date."
                         }
                         if ([string]$header.NumberFormat -ne 'mm/dd') {
-                            throw "Future weekly header column $(47 + $index) does not use mm/dd format."
+                            throw "Future weekly header column $($targetLayout.FutureHeaderColumn + $index) does not use mm/dd format."
                         }
                     }
                     elseif (-not [string]::IsNullOrEmpty(
                         [string]$header.Value2
                     )) {
-                        throw "Unused future weekly header column $(47 + $index) is not blank."
+                        throw "Unused future weekly header column $($targetLayout.FutureHeaderColumn + $index) is not blank."
                     }
                 }
                 finally {
@@ -1047,10 +1139,9 @@ finally {
         }
     }
     foreach ($object in @(
-        $inventoryJTarget, $inventoryITarget, $inventoryHTarget,
         $weeklyActualTarget, $openOrderTarget, $monthlyTarget,
-        $productRange, $inventoryRange, $ddrRange, $oorRange, $targetSheet,
-        $inventorySheet, $ddrSheet, $oorSheet, $destinationWorkbook,
+        $productRange, $ddrRange, $oorRange, $targetSheet,
+        $ddrSheet, $oorSheet, $destinationWorkbook,
         $sourceWorkbook, $excel
     )) { Release-ComObject -ComObject $object }
     [GC]::Collect()

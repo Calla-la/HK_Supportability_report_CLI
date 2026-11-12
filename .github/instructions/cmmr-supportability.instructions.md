@@ -28,6 +28,12 @@ format, write, or validate `CMMR Supportability!X:AA` or `X3:AA3`.
 
 ## Workbooks
 
+For an explicitly requested monthly-only refresh, run the authoritative
+script with `-MonthlyOnly`. This mode reads only `DDR pivot!A:AC` and the
+destination Product IDs, writes and validates only the monthly data range
+(`N:P` in the unified workbook), skips IB PO and confirmation refreshes,
+and does not refresh open orders, inventory, weekly actuals, or Retail.
+
 - Source: `1_HK CMMR+RT Order and Supply data CLI.xlsx`
 - IB PO source: `HK ALL IB PO.XLSX`, in the same directory as the source
   workbook
@@ -74,6 +80,12 @@ Before calculating the supportability report:
 
 ## Task 1 - Open orders
 
+For an explicitly requested open-orders-only update, use
+`-OpenOrdersOnly` with the authoritative CMMR script. This mode writes and
+validates only `R:U` in the unified destination, preserving formatting and
+skipping all other report updates, IB PO, confirmation, and Retail.
+Do not combine it with `-MonthlyOnly` or `-ConfirmationOnly`.
+
 Write values to unified destination columns `R:U`:
 
 - `R`: From `HK OOR Pivot!A:K`, sum values for SoldTo Nbr `5395800`
@@ -87,24 +99,39 @@ Write values to unified destination columns `R:U`:
 
 ## Task 2 - Monthly Actual SI
 
+- Use this same monthly logic for the full CMMR refresh, the combined
+  supportability refresh (including `refresh HK all surface reports`), and
+  `-MonthlyOnly`. It is not a one-off monthly-only correction.
 - Source: `DDR pivot!A:AC`.
 - Use the calendar months currently displayed by the PivotTable, in display
   order.
-- For each Material and month, sum Delivery Qty for Sold-to Party `5395800`,
-  `5395801`, and `5395799`.
+- For each SKU/Material and month, sum Delivery Qty for Sold-to Party
+  `5395800`, `5395801`, and `5395799`, matching destination Product ID in `L`.
 - Write the first three displayed months to unified destination columns
   `N`, `O`, and `P` (October, November, December for the current quarter).
 - If fewer than three months are displayed, write numeric `0` for each
-  missing month.
+  missing month, including the second and third months when absent.
+- In the unified destination, format `N:P` product data from row 4 onward
+  as `#,##0;-#,##0;;@` so numeric zero displays as blank. Do not write empty
+  strings instead of numeric zero or change row 1.
 
 ## Task 3 - DC Available Stock
 
+- For an explicitly requested inventory-only update, use `-InventoryOnly`
+  with the authoritative CMMR script. Read `CMMR INV` and destination Product
+  IDs, write and validate only unified destination `AK` from row 4 onward,
+  preserve formatting, and skip all other refresh tasks. Do not combine
+  this switch with another `Only` mode.
 - Match `CMMR INV` column `A` Material to destination column `L` Product ID.
 - Copy the corresponding numeric value from `CMMR INV` column `J` to
   unified destination column `AK`.
 
 ## Task 4 - Dynamic Weekly Actual SI
 
+- For an explicitly requested weekly-actual-only update, use `-WeeklyOnly`
+  with the authoritative CMMR script. Write and validate only unified
+  destination `AL` from row 4 onward, preserving formatting and skipping
+  all other refresh tasks. Do not combine it with another `Only` mode.
 - Source: `DDR pivot!AI:CZ`.
 - Match Material to destination column `L` Product ID.
 - Sum Delivery Qty for Sold-to Party `5395800`, `5395801`, and `5395799`.
@@ -180,8 +207,9 @@ values to `X:AA`. Write numeric `0` when no qualifying quantity exists.
   existing contents or delete columns.
 - Do not modify destination columns `AB:AG`.
 - Write values only and preserve existing formatting.
-- The only formatting exception is the `X:AA` number format required to
-  display underlying numeric zero values as blank.
+- The only formatting exceptions are the `X:AA` and unified destination
+  `N:P` number formats required to display underlying numeric zero values
+  as blank.
 - Do not change any other formulas, values, cell formatting, number formats,
   conditional formatting, column widths, row heights, hidden/grouped state,
   filters, sorting, outlines, freeze panes, PivotTables, charts, shapes,

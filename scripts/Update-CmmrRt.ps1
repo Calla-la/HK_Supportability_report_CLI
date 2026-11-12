@@ -492,6 +492,38 @@ function Remove-Worksheet {
     }
 }
 
+function Set-WorksheetHeaderFreeze {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Worksheet,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Window
+    )
+
+    $retryTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            $Window.Activate()
+            $Worksheet.Activate()
+            $Window.FreezePanes = $false
+            $Window.SplitColumn = 0
+            $Window.SplitRow = 1
+            $Window.FreezePanes = $true
+            return
+        }
+        catch [System.Runtime.InteropServices.COMException] {
+            # Pane changes can fail transiently even after successful activation.
+            if ($_.Exception.HResult -ne -2146827284 -or
+                $retryTimer.ElapsedMilliseconds -ge 10000) {
+                throw
+            }
+            Write-Verbose "Retrying header freeze for worksheet '$($Worksheet.Name)': $($_.Exception.Message)"
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
 function Set-WorksheetContent {
     param(
         [Parameter(Mandatory = $true)]
@@ -549,12 +581,8 @@ function Set-WorksheetContent {
 
         $parentWorkbook = $Worksheet.Parent
         $parentWorkbook.Activate()
-        $Worksheet.Activate()
         $window = $parentWorkbook.Windows.Item(1)
-        $window.FreezePanes = $false
-        $window.SplitColumn = 0
-        $window.SplitRow = 1
-        $window.FreezePanes = $true
+        Set-WorksheetHeaderFreeze -Worksheet $Worksheet -Window $window
     }
     finally {
         foreach ($comObject in @(
@@ -631,9 +659,12 @@ function Assert-Worksheet {
 
         $parentWorkbook = $Worksheet.Parent
         $parentWorkbook.Activate()
-        $Worksheet.Activate()
         $window = $parentWorkbook.Windows.Item(1)
-        if (-not [bool]$window.FreezePanes -or [int]$window.SplitRow -ne 1) {
+        $window.Activate()
+        $Worksheet.Activate()
+        if (-not [bool]$window.FreezePanes -or
+            [int]$window.SplitRow -ne 1 -or
+            [int]$window.SplitColumn -ne 0) {
             throw "Worksheet '$($Worksheet.Name)' does not have row 1 frozen."
         }
 

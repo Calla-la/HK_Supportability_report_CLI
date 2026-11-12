@@ -13,6 +13,14 @@ param(
 
     [switch]$SkipConfirmation,
 
+    [switch]$MonthlyOnly,
+
+    [switch]$OpenOrdersOnly,
+
+    [switch]$InventoryOnly,
+
+    [switch]$WeeklyOnly,
+
     [string]$DestinationSheetName
 )
 
@@ -20,6 +28,22 @@ $ErrorActionPreference = 'Stop'
 
 if ($ConfirmationOnly -and $SkipConfirmation) {
     throw 'ConfirmationOnly and SkipConfirmation cannot be used together.'
+}
+if ($MonthlyOnly -and $ConfirmationOnly) {
+    throw 'MonthlyOnly and ConfirmationOnly cannot be used together.'
+}
+if ($OpenOrdersOnly -and ($MonthlyOnly -or $ConfirmationOnly)) {
+    throw 'OpenOrdersOnly cannot be combined with MonthlyOnly or ConfirmationOnly.'
+}
+if ($InventoryOnly -and ($MonthlyOnly -or $OpenOrdersOnly -or $ConfirmationOnly)) {
+    throw 'InventoryOnly cannot be combined with another Only mode.'
+}
+if ($WeeklyOnly -and
+    ($MonthlyOnly -or $OpenOrdersOnly -or $InventoryOnly -or $ConfirmationOnly)) {
+    throw 'WeeklyOnly cannot be combined with another Only mode.'
+}
+if ($MonthlyOnly -or $OpenOrdersOnly -or $InventoryOnly -or $WeeklyOnly) {
+    $SkipConfirmation = $true
 }
 
 $targetStartRow = 4
@@ -1052,7 +1076,15 @@ $destinationPath = (Resolve-Path -LiteralPath $DestinationWorkbookPath).Path
 $sameWorkbook = $sourcePath -eq $destinationPath
 $monthlyColumns = if ($sameWorkbook) { @('N', 'P') } else { @('O', 'Q') }
 $openOrderColumns = if ($sameWorkbook) { @('R', 'U') } else { @('S', 'V') }
-$stockWeeklyColumns = if ($sameWorkbook) { @('AK', 'AL') } else { @('AM', 'AN') }
+$stockWeeklyColumns = if ($sameWorkbook) {
+    if ($InventoryOnly) { @('AK', 'AK') }
+    elseif ($WeeklyOnly) { @('AL', 'AL') }
+    else { @('AK', 'AL') }
+} else {
+    if ($InventoryOnly) { @('AM', 'AM') }
+    elseif ($WeeklyOnly) { @('AN', 'AN') }
+    else { @('AM', 'AN') }
+}
 if (-not $PSBoundParameters.ContainsKey('DestinationSheetName')) {
     $DestinationSheetName = if ($sameWorkbook) {
         'CMMR Supportability'
@@ -1223,7 +1255,9 @@ public static class ExcelProcessResolver
         throw "Destination workbook opened as read-only: $destinationPath"
     }
 
-    $inventorySheet = $sourceWorkbook.Worksheets.Item('CMMR INV')
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly -and -not $WeeklyOnly) {
+        $inventorySheet = $sourceWorkbook.Worksheets.Item('CMMR INV')
+    }
     $targetSheet = $destinationWorkbook.Worksheets.Item($DestinationSheetName)
 
     if (-not $SkipConfirmation) {
@@ -1232,28 +1266,37 @@ public static class ExcelProcessResolver
         $ibPoSheet = $sourceWorkbook.Worksheets.Item('IB PO pvt')
     }
 
-    if (-not $ConfirmationOnly) {
-        $oorSheet = $sourceWorkbook.Worksheets.Item('HK OOR Pivot')
-        $ddrPivotSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
-
-        $oorLastRow = [math]::Max(
-            (Get-LastDataRow -Worksheet $oorSheet -Column 3),
-            (Get-LastDataRow -Worksheet $oorSheet -Column 16)
-        )
-        $oorRange = $oorSheet.Range("A1:V$oorLastRow")
-        $oorValues = $oorRange.Value2
-
-        $ddrLastRow = [math]::Max(
-            (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 2),
-            (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 36)
-        )
-        $ddrRange = $ddrPivotSheet.Range("A1:CZ$ddrLastRow")
-        $ddrValues = $ddrRange.Value2
+    if (-not $ConfirmationOnly -and -not $InventoryOnly) {
+        if (-not $OpenOrdersOnly) {
+            $ddrPivotSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
+            $ddrLastRow = Get-LastDataRow -Worksheet $ddrPivotSheet -Column 2
+            $ddrLastColumn = 'AC'
+            if (-not $MonthlyOnly) {
+                $ddrLastRow = [math]::Max(
+                    $ddrLastRow,
+                    (Get-LastDataRow -Worksheet $ddrPivotSheet -Column 36)
+                )
+                $ddrLastColumn = 'CZ'
+            }
+            $ddrRange = $ddrPivotSheet.Range("A1:${ddrLastColumn}$ddrLastRow")
+            $ddrValues = $ddrRange.Value2
+        }
+        if (-not $MonthlyOnly -and -not $WeeklyOnly) {
+            $oorSheet = $sourceWorkbook.Worksheets.Item('HK OOR Pivot')
+            $oorLastRow = [math]::Max(
+                (Get-LastDataRow -Worksheet $oorSheet -Column 3),
+                (Get-LastDataRow -Worksheet $oorSheet -Column 16)
+            )
+            $oorRange = $oorSheet.Range("A1:V$oorLastRow")
+            $oorValues = $oorRange.Value2
+        }
     }
 
-    $inventoryLastRow = Get-LastDataRow -Worksheet $inventorySheet -Column 1
-    $inventoryRange = $inventorySheet.Range("A1:J$inventoryLastRow")
-    $inventoryValues = $inventoryRange.Value2
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly -and -not $WeeklyOnly) {
+        $inventoryLastRow = Get-LastDataRow -Worksheet $inventorySheet -Column 1
+        $inventoryRange = $inventorySheet.Range("A1:J$inventoryLastRow")
+        $inventoryValues = $inventoryRange.Value2
+    }
 
     if (-not $SkipConfirmation) {
         $confirmationLastRow = Get-LastDataRow `
@@ -1292,7 +1335,7 @@ public static class ExcelProcessResolver
     )
     $targetProductValues = $targetProductRange.Value2
 
-    if (-not $ConfirmationOnly) {
+    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $columnS = Get-PivotBlockTotals `
             -Values $oorValues `
             -LastRow $oorLastRow `
@@ -1325,14 +1368,22 @@ public static class ExcelProcessResolver
             -FirstValueColumn 4 `
             -LastValueColumn 10 `
             -IncludedSoldTo @('1001089')
+    }
+    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $OpenOrdersOnly) {
+        if (-not $InventoryOnly) {
+            $weekly = Get-WeeklyActuals `
+                -Values $ddrValues `
+                -LastRow $ddrLastRow `
+                -RunDate $AsOfDate
+        }
+        if (-not $WeeklyOnly) {
+            $inventory = Get-InventoryTotals `
+                -Values $inventoryValues `
+                -LastRow $inventoryLastRow
+        }
+    }
+    if (-not $ConfirmationOnly -and -not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $monthly = Get-MonthlyActuals -Values $ddrValues -LastRow $ddrLastRow
-        $weekly = Get-WeeklyActuals `
-            -Values $ddrValues `
-            -LastRow $ddrLastRow `
-            -RunDate $AsOfDate
-        $inventory = Get-InventoryTotals `
-            -Values $inventoryValues `
-            -LastRow $inventoryLastRow
     }
     if (-not $SkipConfirmation) {
         $ibPoTotals = Get-IbPoConfirmationTotals -Values $ibPoValues
@@ -1347,17 +1398,23 @@ public static class ExcelProcessResolver
     if (-not $SkipConfirmation) {
         $confirmationOutput = New-Object 'object[,]' $targetRowCount, 4
     }
-    if (-not $ConfirmationOnly) {
+    if (-not $ConfirmationOnly -and -not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
+    }
+    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $openOrderOutput = New-Object 'object[,]' $targetRowCount, 4
-        $stockWeeklyOutput = New-Object 'object[,]' $targetRowCount, 2
+    }
+    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $OpenOrdersOnly) {
+        $stockWeeklyColumnCount = if ($InventoryOnly -or $WeeklyOnly) { 1 } else { 2 }
+        $stockWeeklyOutput = New-Object 'object[,]' $targetRowCount, $stockWeeklyColumnCount
     }
 
     for ($outputRow = 0; $outputRow -lt $targetRowCount; $outputRow++) {
         if (-not $ConfirmationOnly) {
             $productId = Get-NormalizedKey `
                 -Value $targetProductValues[($outputRow + 1), 1]
-
+        }
+        if (-not $ConfirmationOnly -and -not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
             for ($monthIndex = 0; $monthIndex -lt 3; $monthIndex++) {
                 $monthValue = [double]0
                 if ($monthIndex -lt $monthly.MonthOrder.Count) {
@@ -1368,7 +1425,8 @@ public static class ExcelProcessResolver
                 }
                 $monthlyOutput[$outputRow, $monthIndex] = $monthValue
             }
-
+        }
+        if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
             $openOrderOutput[$outputRow, 0] =
                 Get-MapValue -Map $columnS -Key $productId
             $openOrderOutput[$outputRow, 1] =
@@ -1377,10 +1435,19 @@ public static class ExcelProcessResolver
                 Get-MapValue -Map $columnU -Key $productId
             $openOrderOutput[$outputRow, 3] =
                 Get-MapValue -Map $columnV -Key $productId
-            $stockWeeklyOutput[$outputRow, 0] =
-                Get-MapValue -Map $inventory -Key $productId
-            $stockWeeklyOutput[$outputRow, 1] =
-                Get-MapValue -Map $weekly.Totals -Key $productId
+        }
+        if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $OpenOrdersOnly) {
+            if ($WeeklyOnly) {
+                $stockWeeklyOutput[$outputRow, 0] =
+                    Get-MapValue -Map $weekly.Totals -Key $productId
+            } else {
+                $stockWeeklyOutput[$outputRow, 0] =
+                    Get-MapValue -Map $inventory -Key $productId
+                if (-not $InventoryOnly) {
+                    $stockWeeklyOutput[$outputRow, 1] =
+                        Get-MapValue -Map $weekly.Totals -Key $productId
+                }
+            }
         }
 
         if (-not $SkipConfirmation) {
@@ -1395,15 +1462,21 @@ public static class ExcelProcessResolver
     }
 
     if (-not $ConfirmationOnly) {
-        $monthlyTarget = $targetSheet.Range(
-            "$($monthlyColumns[0])${targetStartRow}:$($monthlyColumns[1])${targetLastRow}"
-        )
-        $openOrderTarget = $targetSheet.Range(
-            "$($openOrderColumns[0])${targetStartRow}:$($openOrderColumns[1])${targetLastRow}"
-        )
-        $stockWeeklyTarget = $targetSheet.Range(
-            "$($stockWeeklyColumns[0])${targetStartRow}:$($stockWeeklyColumns[1])${targetLastRow}"
-        )
+        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+            $monthlyTarget = $targetSheet.Range(
+                "$($monthlyColumns[0])${targetStartRow}:$($monthlyColumns[1])${targetLastRow}"
+            )
+        }
+        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+            $openOrderTarget = $targetSheet.Range(
+                "$($openOrderColumns[0])${targetStartRow}:$($openOrderColumns[1])${targetLastRow}"
+            )
+        }
+        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
+            $stockWeeklyTarget = $targetSheet.Range(
+                "$($stockWeeklyColumns[0])${targetStartRow}:$($stockWeeklyColumns[1])${targetLastRow}"
+            )
+        }
     }
     if (-not $SkipConfirmation) {
         $confirmationTarget = $targetSheet.Range(
@@ -1430,16 +1503,23 @@ public static class ExcelProcessResolver
         -EndRow $targetLastRow
 
     if (-not $ConfirmationOnly) {
-        Set-RangeValues `
-            -Worksheet $targetSheet `
-            -Range $monthlyTarget `
-            -Values $monthlyOutput `
-            -RowRuns $rowRuns
-        Set-RangeValues `
-            -Worksheet $targetSheet `
-            -Range $openOrderTarget `
-            -Values $openOrderOutput `
-            -RowRuns $rowRuns
+        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+            Set-RangeValues `
+                -Worksheet $targetSheet `
+                -Range $monthlyTarget `
+                -Values $monthlyOutput `
+                -RowRuns $rowRuns
+            if ($sameWorkbook) {
+                $monthlyTarget.NumberFormat = '#,##0;-#,##0;;@'
+            }
+        }
+        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+            Set-RangeValues `
+                -Worksheet $targetSheet `
+                -Range $openOrderTarget `
+                -Values $openOrderOutput `
+                -RowRuns $rowRuns
+        }
     }
     if (-not $SkipConfirmation) {
         Set-RangeValues `
@@ -1451,11 +1531,13 @@ public static class ExcelProcessResolver
         $confirmationHeaderTarget.Value2 = $confirmationHeaderOutput
     }
     if (-not $ConfirmationOnly) {
-        Set-RangeValues `
-            -Worksheet $targetSheet `
-            -Range $stockWeeklyTarget `
-            -Values $stockWeeklyOutput `
-            -RowRuns $rowRuns
+        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
+            Set-RangeValues `
+                -Worksheet $targetSheet `
+                -Range $stockWeeklyTarget `
+                -Values $stockWeeklyOutput `
+                -RowRuns $rowRuns
+        }
     }
 
     $excel.Calculation = -4105
@@ -1465,14 +1547,22 @@ public static class ExcelProcessResolver
     }
 
     if (-not $ConfirmationOnly) {
-        Assert-ArrayValues `
-            -Actual $monthlyTarget.Value2 `
-            -Expected $monthlyOutput `
-            -RangeName "$DestinationSheetName $($monthlyColumns -join ':')"
-        Assert-ArrayValues `
-            -Actual $openOrderTarget.Value2 `
-            -Expected $openOrderOutput `
-            -RangeName "$DestinationSheetName $($openOrderColumns -join ':')"
+        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+            Assert-ArrayValues `
+                -Actual $monthlyTarget.Value2 `
+                -Expected $monthlyOutput `
+                -RangeName "$DestinationSheetName $($monthlyColumns -join ':')"
+            if ($sameWorkbook -and
+                $monthlyTarget.NumberFormat -ne '#,##0;-#,##0;;@') {
+                throw 'CMMR monthly quantities must display numeric zero as blank.'
+            }
+        }
+        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+            Assert-ArrayValues `
+                -Actual $openOrderTarget.Value2 `
+                -Expected $openOrderOutput `
+                -RangeName "$DestinationSheetName $($openOrderColumns -join ':')"
+        }
     }
     if (-not $SkipConfirmation) {
         Assert-ArrayValues `
@@ -1485,10 +1575,12 @@ public static class ExcelProcessResolver
             -RangeName "$DestinationSheetName X3:AA3"
     }
     if (-not $ConfirmationOnly) {
-        Assert-ArrayValues `
-            -Actual $stockWeeklyTarget.Value2 `
-            -Expected $stockWeeklyOutput `
-            -RangeName "$DestinationSheetName $($stockWeeklyColumns -join ':')"
+        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
+            Assert-ArrayValues `
+                -Actual $stockWeeklyTarget.Value2 `
+                -Expected $stockWeeklyOutput `
+                -RangeName "$DestinationSheetName $($stockWeeklyColumns -join ':')"
+        }
     }
 
     $refreshSucceeded = $true
@@ -1601,7 +1693,26 @@ if ($refreshSucceeded) {
                 '; no future weeks with AD data.'
             })
     }
-    if ($ConfirmationOnly) {
+    if ($WeeklyOnly) {
+        Write-Host (
+            "CMMR weekly-only $($stockWeeklyColumns[0]) refresh succeeded. " +
+            "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
+            "$($weekly.EndDate.ToString('yyyy-MM-dd'))."
+        )
+    }
+    elseif ($InventoryOnly) {
+        Write-Host "CMMR inventory-only $($stockWeeklyColumns[0]) refresh succeeded."
+    }
+    elseif ($OpenOrdersOnly) {
+        Write-Host "CMMR open-orders-only $($openOrderColumns -join ':') refresh succeeded."
+    }
+    elseif ($MonthlyOnly) {
+        Write-Host (
+            "CMMR monthly-only $($monthlyColumns -join ':') refresh succeeded. " +
+            "Displayed months: $($monthly.MonthOrder -join ', ')."
+        )
+    }
+    elseif ($ConfirmationOnly) {
         Write-Host (
             'CMMR confirmation X:AA refresh succeeded. ' +
             "Confirmation buckets: $confirmationSummary"

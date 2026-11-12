@@ -59,6 +59,11 @@ do not run the refresh unless the user requests execution.
 - Follow the detailed rules in `.github\instructions\cmmr-rt.instructions.md`,
   `.github\instructions\cmmr-supportability.instructions.md`, and
   `.github\instructions\retail-supportability.instructions.md`.
+- Retail uses the current compact layout: Product ID `N`, monthly actuals
+  `P:R`, open orders `AC:AK`, future headers `AE3:AK3`, and weekly actual `BA`.
+  The former inventory-copy logic is removed. Refresh BB product-row XLOOKUP
+  formulas against `Retail INV!J:J`, using INDIRECT so the formulas survive
+  inventory-sheet recreation; preserve BB formatting and row 1.
 - Preserve the combined supportability entry point's existing scope: it
   skips `CMMR Supportability!X:AA` and `X3:AA3`. Do not add the separate
   confirmation-only script to this shortcut.

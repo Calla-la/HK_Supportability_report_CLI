@@ -28,6 +28,16 @@ Automates the CMMR-RT inventory and system confirmation update workflow.
 powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrRt.ps1 -WorkbookPath "<workbook-path>"
 ```
 
+Inventory header freezing explicitly activates the workbook window and retries
+transient Excel pane-setting errors for up to 10 seconds. Persistent errors
+still stop the update; final validation checks that only row 1 is frozen.
+
+Run the focused regression checks without opening Excel:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\Test-CmmrRtHeaderFreeze.ps1
+```
+
 ## Refresh all HK Surface reports
 
 The shortcut `refresh HK all surface reports` follows

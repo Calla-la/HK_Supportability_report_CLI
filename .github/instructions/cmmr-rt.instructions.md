@@ -35,6 +35,9 @@ When the user says "Run the CMMR-RT inventory and system confirmation update":
 - Retry only Excel COM save failures, up to three attempts per workbook, and
   report the exact workbook name if all attempts fail.
 - Retry rejected Excel COM calls for at most 10 seconds per call.
+- Activate the inventory workbook window explicitly before freezing row 1.
+  Retry transient pane-setting errors (`0x800A03EC`) for at most 10 seconds;
+  propagate other errors immediately and stop if freezing still fails.
 - Retry graceful Excel Quit twice. If the script's Excel process remains
   running after COM release, report its PID without force-terminating it.
 
