@@ -161,6 +161,55 @@ public sealed class CmmrOleMessageFilter : ICmmrOleMessageFilter
     [CmmrOleMessageFilter]::Register()
 }
 
+function Invoke-ExcelComRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Operation,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context,
+
+        [int]$TimeoutSeconds = 10
+    )
+
+    $deadline = [datetime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastComException = $null
+    while ($true) {
+        if ($null -ne $lastComException -and
+            [datetime]::UtcNow -ge $deadline) {
+            $hresultText = '0x{0:X8}' -f
+                ($lastComException.HResult -band 0xFFFFFFFFL)
+            throw "Excel COM operation '$Context' failed after $TimeoutSeconds seconds ($hresultText): $($lastComException.Message)"
+        }
+
+        try {
+            return & $Operation
+        }
+        catch {
+            $comException = $_.Exception
+            while ($comException -isnot [Runtime.InteropServices.COMException] -and
+                $null -ne $comException.InnerException) {
+                $comException = $comException.InnerException
+            }
+            if ($comException -isnot [Runtime.InteropServices.COMException]) {
+                throw
+            }
+            $hresult = $comException.HResult -band 0xFFFFFFFFL
+            if ($hresult -notin @(0x80010001L, 0x8001010AL, 0x800AC472L)) {
+                throw
+            }
+            $lastComException = $comException
+            $remainingMilliseconds =
+                ($deadline - [datetime]::UtcNow).TotalMilliseconds
+            if ($remainingMilliseconds -le 250) {
+                $hresultText = '0x{0:X8}' -f $hresult
+                throw "Excel COM operation '$Context' failed after $TimeoutSeconds seconds ($hresultText): $($comException.Message)"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
 function Get-NormalizedKey {
     param(
         [AllowNull()]
@@ -1215,7 +1264,9 @@ public static class ExcelProcessResolver
             throw 'Failed to refresh the IB PO pvt PivotTable.'
         }
 
-        $excel.Calculation = -4105
+        Invoke-ExcelComRetry -Context 'restore Automatic calculation before source save' -Operation {
+            $excel.Calculation = -4105
+        }
         $sourceWorkbook.Save()
         if ($excel.Calculation -ne -4105) {
             throw 'Excel calculation mode is not Automatic after saving the source workbook.'
@@ -1540,7 +1591,9 @@ public static class ExcelProcessResolver
         }
     }
 
-    $excel.Calculation = -4105
+    Invoke-ExcelComRetry -Context 'restore Automatic calculation before destination save' -Operation {
+        $excel.Calculation = -4105
+    }
     $destinationWorkbook.Save()
     if ($excel.Calculation -ne -4105) {
         throw 'Excel calculation mode is not Automatic after saving the destination workbook.'

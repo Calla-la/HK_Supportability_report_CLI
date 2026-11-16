@@ -210,4 +210,71 @@ foreach ($monthCount in @(1, 2, 3)) {
     }
 }
 
-Write-Host 'CMMR unified/legacy layout and confirmation-only isolation tests passed.'
+$retryDefinition = $ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Invoke-ExcelComRetry'
+}, $false) | Select-Object -First 1
+if ($null -eq $retryDefinition) { throw 'Could not locate COM retry helper.' }
+Invoke-Expression $retryDefinition.Extent.Text
+
+foreach ($wrapped in @($false, $true)) {
+    $state = @{ Attempts = 0 }
+    $result = Invoke-ExcelComRetry -Context 'restore Automatic calculation' -Operation {
+        $state.Attempts++
+        if ($state.Attempts -eq 1) {
+            $busy = [Runtime.InteropServices.COMException]::new(
+                'Excel is busy', -2146777998
+            )
+            if ($wrapped) {
+                throw [Management.Automation.SetValueInvocationException]::new(
+                    'Exception setting Calculation', $busy
+                )
+            }
+            throw $busy
+        }
+        return 'ready'
+    }
+    if ($state.Attempts -ne 2 -or $result -ne 'ready') {
+        throw 'Transient Excel busy error was not retried successfully.'
+    }
+}
+
+foreach ($failure in @(
+    [Runtime.InteropServices.COMException]::new('Access denied', -2147024891),
+    [InvalidOperationException]::new('Invalid operation')
+)) {
+    $state = @{ Attempts = 0 }
+    $caught = $false
+    try {
+        Invoke-ExcelComRetry -Context 'non-transient failure' -Operation {
+            $state.Attempts++
+            throw $failure
+        }
+    }
+    catch {
+        $caught = $true
+        if ($_.Exception.Message -notlike "*$($failure.Message)*") { throw }
+    }
+    if (-not $caught -or $state.Attempts -ne 1) {
+        throw 'Non-transient error was swallowed or retried.'
+    }
+}
+
+$state = @{ Attempts = 0 }
+$caught = $false
+try {
+    Invoke-ExcelComRetry -Context 'busy timeout' -TimeoutSeconds 1 -Operation {
+        $state.Attempts++
+        throw [Runtime.InteropServices.COMException]::new('Excel is busy', -2146777998)
+    }
+}
+catch {
+    $caught = $true
+    if ($_.Exception.Message -notlike "*busy timeout*0x800AC472*") { throw }
+}
+if (-not $caught -or $state.Attempts -gt 4) {
+    throw 'Persistent Excel busy error did not stop at the retry deadline.'
+}
+
+Write-Host 'CMMR layout, monthly aggregation, and bounded COM retry tests passed.'
