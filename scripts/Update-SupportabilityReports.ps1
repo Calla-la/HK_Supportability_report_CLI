@@ -18,8 +18,7 @@ $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 & (Join-Path $scriptDirectory 'Update-CmmrSupportability.ps1') `
     -SourceWorkbookPath $SourceWorkbookPath `
     -DestinationWorkbookPath $CmmrDestinationWorkbookPath `
-    -AsOfDate $AsOfDate `
-    -SkipConfirmation
+    -AsOfDate $AsOfDate
 
 & (Join-Path $scriptDirectory 'Update-RetailSupportability.ps1') `
     -SourceWorkbookPath $SourceWorkbookPath `

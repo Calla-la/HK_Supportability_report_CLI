@@ -11,9 +11,8 @@ When the user says
 
 3. Do not create an alternative implementation.
 4. Report success only when both refreshes and their validations succeed.
-5. The combined entry point skips CMMR confirmation columns `X:AA` and
-   `X3:AA3`; refresh those separately with
-   `scripts/Update-CmmrConfirmation.ps1`.
+5. CMMR `X:AA` refresh functionality has been removed. Preserve those
+   columns and their existing headers without updating them.
 6. The user manually replaces `HK all OOR` and refreshes `HK OOR Pivot`
    before running the combined entry point. The combined entry point must not
    perform either operation.

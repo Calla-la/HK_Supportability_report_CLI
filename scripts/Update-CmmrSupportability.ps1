@@ -9,10 +9,6 @@ param(
 
     [datetime]$AsOfDate = (Get-Date),
 
-    [switch]$ConfirmationOnly,
-
-    [switch]$SkipConfirmation,
-
     [switch]$MonthlyOnly,
 
     [switch]$OpenOrdersOnly,
@@ -26,24 +22,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if ($ConfirmationOnly -and $SkipConfirmation) {
-    throw 'ConfirmationOnly and SkipConfirmation cannot be used together.'
+if ($OpenOrdersOnly -and $MonthlyOnly) {
+    throw 'OpenOrdersOnly cannot be combined with MonthlyOnly.'
 }
-if ($MonthlyOnly -and $ConfirmationOnly) {
-    throw 'MonthlyOnly and ConfirmationOnly cannot be used together.'
-}
-if ($OpenOrdersOnly -and ($MonthlyOnly -or $ConfirmationOnly)) {
-    throw 'OpenOrdersOnly cannot be combined with MonthlyOnly or ConfirmationOnly.'
-}
-if ($InventoryOnly -and ($MonthlyOnly -or $OpenOrdersOnly -or $ConfirmationOnly)) {
+if ($InventoryOnly -and ($MonthlyOnly -or $OpenOrdersOnly)) {
     throw 'InventoryOnly cannot be combined with another Only mode.'
 }
 if ($WeeklyOnly -and
-    ($MonthlyOnly -or $OpenOrdersOnly -or $InventoryOnly -or $ConfirmationOnly)) {
+    ($MonthlyOnly -or $OpenOrdersOnly -or $InventoryOnly)) {
     throw 'WeeklyOnly cannot be combined with another Only mode.'
-}
-if ($MonthlyOnly -or $OpenOrdersOnly -or $InventoryOnly -or $WeeklyOnly) {
-    $SkipConfirmation = $true
 }
 
 $targetStartRow = 4
@@ -232,24 +219,6 @@ function Get-NormalizedSoldTo {
     $text = Get-NormalizedKey -Value $Value
     if ($text -match '^\d+$') {
         return $text.TrimStart('0')
-    }
-
-    return $text
-}
-
-function Get-NormalizedIdentifier {
-    param(
-        [AllowNull()]
-        [object]$Value
-    )
-
-    $text = Get-NormalizedKey -Value $Value
-    if ($text -match '^\d+$') {
-        $trimmed = $text.TrimStart('0')
-        if ([string]::IsNullOrEmpty($trimmed)) {
-            return '0'
-        }
-        return $trimmed
     }
 
     return $text
@@ -639,258 +608,6 @@ function Get-InventoryTotals {
     return ,$totals
 }
 
-function Get-CurrentCalendarMonday {
-    param(
-        [Parameter(Mandatory = $true)]
-        [datetime]$RunDate
-    )
-
-    $date = $RunDate.Date
-    $daysSinceMonday = (([int]$date.DayOfWeek + 6) % 7)
-    return $date.AddDays(-$daysSinceMonday)
-}
-
-function Get-SkuDateKey {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Sku,
-
-        [Parameter(Mandatory = $true)]
-        [datetime]$Date
-    )
-
-    return "$Sku|$($Date.ToString('yyyy-MM-dd'))"
-}
-
-function Get-IbPoConfirmationTotals {
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowNull()]
-        [object[,]]$Values
-    )
-
-    $rowCount = $Values.GetLength(0)
-    $columnCount = $Values.GetLength(1)
-    $headerRow = 0
-    $materialColumn = 0
-    for ($rowIndex = 1; $rowIndex -le $rowCount; $rowIndex++) {
-        for ($columnIndex = 1;
-            $columnIndex -le $columnCount;
-            $columnIndex++) {
-            if ((Get-NormalizedKey -Value $Values[
-                $rowIndex,
-                $columnIndex
-            ]) -eq 'MATERIAL') {
-                $headerRow = $rowIndex
-                $materialColumn = $columnIndex
-                break
-            }
-        }
-        if ($headerRow -ne 0) {
-            break
-        }
-    }
-    if ($headerRow -eq 0) {
-        throw "IB PO pvt does not contain a 'Material' header."
-    }
-
-    $dateColumns = @{}
-    for ($columnIndex = $materialColumn + 1;
-        $columnIndex -le $columnCount;
-        $columnIndex++) {
-        $header = Get-NormalizedKey -Value $Values[
-            $headerRow,
-            $columnIndex
-        ]
-        if ($header -eq 'GRAND TOTAL') {
-            break
-        }
-
-        $headerValue = $Values[$headerRow, $columnIndex]
-        if ($headerValue -is [datetime] -or
-            $headerValue -is [byte] -or
-            $headerValue -is [int16] -or
-            $headerValue -is [int32] -or
-            $headerValue -is [int64] -or
-            $headerValue -is [single] -or
-            $headerValue -is [double] -or
-            $headerValue -is [decimal]) {
-            $dateColumns[$columnIndex] = ConvertTo-ExcelDate `
-                -Value $headerValue `
-                -Context "IB PO pvt header column $columnIndex"
-        }
-    }
-    if ($dateColumns.Count -eq 0) {
-        throw 'IB PO pvt does not contain any date columns.'
-    }
-
-    $totals = [System.Collections.Hashtable]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    $material = ''
-    for ($rowIndex = $headerRow + 1; $rowIndex -le $rowCount; $rowIndex++) {
-        $rowMaterial = Get-NormalizedIdentifier `
-            -Value $Values[$rowIndex, $materialColumn]
-        if ($rowMaterial -eq 'GRAND TOTAL') {
-            break
-        }
-        if (-not [string]::IsNullOrWhiteSpace($rowMaterial)) {
-            $material = $rowMaterial
-        }
-        if ([string]::IsNullOrWhiteSpace($material)) {
-            continue
-        }
-
-        foreach ($columnIndex in $dateColumns.Keys) {
-            $quantity = ConvertTo-Number `
-                -Value $Values[$rowIndex, $columnIndex] `
-                -Context "IB PO pvt row $rowIndex, column $columnIndex"
-            $key = Get-SkuDateKey `
-                -Sku $material `
-                -Date $dateColumns[$columnIndex]
-            Add-ToMap -Map $totals -Key $key -Value $quantity
-        }
-    }
-
-    return ,$totals
-}
-
-function Get-ConfirmationWeeklyBuckets {
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowNull()]
-        [object[,]]$Values,
-
-        [Parameter(Mandatory = $true)]
-        [int]$LastRow,
-
-        [Parameter(Mandatory = $true)]
-        [System.Collections.Hashtable]$IbPoTotals,
-
-        [Parameter(Mandatory = $true)]
-        [datetime]$RunDate
-    )
-
-    $expectedHeaders = @{
-        3 = 'SOLDTO NBR'
-        24 = 'SKU'
-        30 = 'TOTAL CONFIRMED QTY'
-        45 = 'PLANT'
-        76 = 'DATE TO RELEASE'
-    }
-    foreach ($columnIndex in $expectedHeaders.Keys) {
-        $actualHeader = Get-NormalizedKey -Value $Values[1, $columnIndex]
-        if ($actualHeader -ne $expectedHeaders[$columnIndex]) {
-            throw "CMMR confirmation column $columnIndex should be '$($expectedHeaders[$columnIndex])', but found '$actualHeader'."
-        }
-    }
-
-    $currentMonday = Get-CurrentCalendarMonday -RunDate $RunDate
-    $confirmationTotals = [System.Collections.Hashtable]::new(
-        [System.StringComparer]::OrdinalIgnoreCase
-    )
-    $dateByKey = @{}
-    $skuByKey = @{}
-
-    for ($rowIndex = 2; $rowIndex -le $LastRow; $rowIndex++) {
-        $plant = Get-NormalizedIdentifier -Value $Values[$rowIndex, 45]
-        $soldTo = Get-NormalizedSoldTo -Value $Values[$rowIndex, 3]
-        if ($plant -ne '4815' -or $soldTo -notin $soldToParties) {
-            continue
-        }
-
-        $sku = Get-NormalizedIdentifier -Value $Values[$rowIndex, 24]
-        if ([string]::IsNullOrWhiteSpace($sku)) {
-            continue
-        }
-
-        $releaseValue = $Values[$rowIndex, 76]
-        $releaseText = Get-NormalizedKey -Value $releaseValue
-        if ([string]::IsNullOrWhiteSpace($releaseText) -or
-            $releaseText -in @('TBD', 'DELIVERED')) {
-            continue
-        }
-        $releaseDate = ConvertTo-ExcelDate `
-            -Value $releaseValue `
-            -Context "CMMR confirmation row $rowIndex, column BX"
-        if ($releaseDate -lt $currentMonday) {
-            continue
-        }
-
-        $quantity = ConvertTo-Number `
-            -Value $Values[$rowIndex, 30] `
-            -Context "CMMR confirmation row $rowIndex, column AD"
-        $key = Get-SkuDateKey -Sku $sku -Date $releaseDate
-        Add-ToMap -Map $confirmationTotals -Key $key -Value $quantity
-        $dateByKey[$key] = $releaseDate
-        $skuByKey[$key] = $sku
-    }
-
-    $futureWeekTotals = @{}
-    foreach ($entry in $confirmationTotals.GetEnumerator()) {
-        $key = [string]$entry.Key
-        $sku = [string]$skuByKey[$key]
-        $releaseDate = [datetime]$dateByKey[$key]
-        $quantity = [double]$entry.Value
-        $weekMonday = Get-CurrentCalendarMonday -RunDate $releaseDate
-        $weekFriday = $weekMonday.AddDays(4)
-
-        if ($weekMonday -eq $currentMonday) {
-            continue
-        }
-
-        $weekKey = $weekFriday.ToString('yyyy-MM-dd')
-        if (-not $futureWeekTotals.ContainsKey($weekKey)) {
-            $futureWeekTotals[$weekKey] =
-                [System.Collections.Hashtable]::new(
-                    [System.StringComparer]::OrdinalIgnoreCase
-                )
-        }
-        Add-ToMap -Map $futureWeekTotals[$weekKey] -Key $sku -Value $quantity
-    }
-
-    $futureFridays = @(
-        $futureWeekTotals.Keys |
-            ForEach-Object {
-                [datetime]::ParseExact(
-                    $_,
-                    'yyyy-MM-dd',
-                    [System.Globalization.CultureInfo]::InvariantCulture
-                )
-            } |
-            Sort-Object |
-            Select-Object -First 4
-    )
-    $weekMaps = @()
-    foreach ($futureFriday in $futureFridays) {
-        $futureWeekMap = [System.Collections.Hashtable]::new(
-            [System.StringComparer]::OrdinalIgnoreCase
-        )
-        $weekKey = $futureFriday.ToString('yyyy-MM-dd')
-        foreach ($entry in $futureWeekTotals[$weekKey].GetEnumerator()) {
-            $sku = [string]$entry.Key
-            $quantity = [double]$entry.Value
-            $ibPoKey = Get-SkuDateKey -Sku $sku -Date $futureFriday
-            $ibPoQuantity = Get-MapValue -Map $IbPoTotals -Key $ibPoKey
-            if ($ibPoQuantity -ge $quantity) {
-                $futureWeekMap[$sku] = $quantity
-            }
-        }
-        $weekMaps += $futureWeekMap
-    }
-    while ($weekMaps.Count -lt 4) {
-        $weekMaps += [System.Collections.Hashtable]::new(
-            [System.StringComparer]::OrdinalIgnoreCase
-        )
-    }
-
-    return [pscustomobject]@{
-        WeekMaps = $weekMaps
-        StartDate = $currentMonday
-        FutureFridays = $futureFridays
-    }
-}
-
 function Get-MapValue {
     param(
         [Parameter(Mandatory = $true)]
@@ -1145,19 +862,9 @@ if (-not $PSBoundParameters.ContainsKey('DestinationSheetName')) {
 if ([string]::IsNullOrWhiteSpace($DestinationSheetName)) {
     throw 'DestinationSheetName cannot be blank.'
 }
-if (-not $SkipConfirmation) {
-    $ibPoSourcePath = Join-Path `
-        -Path (Split-Path -Parent $sourcePath) `
-        -ChildPath 'HK ALL IB PO.XLSX'
-    if (-not (Test-Path -LiteralPath $ibPoSourcePath -PathType Leaf)) {
-        throw "IB PO source workbook not found: $ibPoSourcePath"
-    }
-    $ibPoSourcePath = (Resolve-Path -LiteralPath $ibPoSourcePath).Path
-}
 $excel = $null
 $sourceWorkbook = $null
 $destinationWorkbook = $null
-$ibPoSourceWorkbook = $null
 $excelProcess = $null
 $refreshSucceeded = $false
 $comFilterRegistered = $false
@@ -1204,97 +911,6 @@ public static class ExcelProcessResolver
     $excel.AutomationSecurity = 3
     $excel.ScreenUpdating = $false
 
-    if (-not $SkipConfirmation) {
-        $ibPoSourceWorkbook = $excel.Workbooks.Open(
-            $ibPoSourcePath,
-            0,
-            $true
-        )
-        $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, $false)
-        if ([bool]$sourceWorkbook.ReadOnly) {
-            throw "Source workbook opened as read-only and cannot update IB PO: $sourcePath"
-        }
-
-        $ibPoRawSheet = $ibPoSourceWorkbook.Worksheets.Item(1)
-        $ibPoLastRow = Get-LastDataRow -Worksheet $ibPoRawSheet -Column 16
-        if ($ibPoLastRow -lt 2) {
-            throw "IB PO source worksheet has no data rows: $ibPoSourcePath"
-        }
-
-        $ibPoHeaderCell = $ibPoRawSheet.Cells.Item(1, 23)
-        $ibPoHeaderCell.Value2 = 'IB PO RDD'
-        $ibPoRddRange = $ibPoRawSheet.Range("W2:W$ibPoLastRow")
-        $ibPoRddRange.FormulaR1C1 =
-            '=IF(RC[-7]="","",RC[-7]-WEEKDAY(RC[-7],2)+5)'
-        $ibPoRddRange.Calculate()
-        $ibPoRddRange.Value2 = $ibPoRddRange.Value2
-        $ibPoRddRange.NumberFormat = 'yyyy-mm-dd'
-
-        for ($sheetIndex = $sourceWorkbook.Worksheets.Count;
-            $sheetIndex -ge 1;
-            $sheetIndex--) {
-            $candidateSheet = $sourceWorkbook.Worksheets.Item($sheetIndex)
-            try {
-                if ($candidateSheet.Name -eq 'IB PO') {
-                    $candidateSheet.Delete()
-                }
-            }
-            finally {
-                Release-ComObject -ComObject $candidateSheet
-            }
-        }
-
-        $lastSourceSheet = $sourceWorkbook.Worksheets.Item(
-            $sourceWorkbook.Worksheets.Count
-        )
-        try {
-            $ibPoRawSheet.Copy([Type]::Missing, $lastSourceSheet)
-        }
-        finally {
-            Release-ComObject -ComObject $lastSourceSheet
-        }
-        $ibPoReplacementSheet = $sourceWorkbook.ActiveSheet
-        $ibPoReplacementSheet.Name = 'IB PO'
-
-        $ibPoPivotSheetForRefresh =
-            $sourceWorkbook.Worksheets.Item('IB PO pvt')
-        $ibPoPivotForRefresh =
-            $ibPoPivotSheetForRefresh.PivotTables().Item(1)
-        if (-not [bool]$ibPoPivotForRefresh.RefreshTable()) {
-            throw 'Failed to refresh the IB PO pvt PivotTable.'
-        }
-
-        Invoke-ExcelComRetry -Context 'restore Automatic calculation before source save' -Operation {
-            $excel.Calculation = -4105
-        }
-        $sourceWorkbook.Save()
-        if ($excel.Calculation -ne -4105) {
-            throw 'Excel calculation mode is not Automatic after saving the source workbook.'
-        }
-        $sourceWorkbook.Close($false)
-        $ibPoSourceWorkbook.Close($false)
-        foreach ($comObject in @(
-            $ibPoPivotForRefresh,
-            $ibPoPivotSheetForRefresh,
-            $ibPoReplacementSheet,
-            $ibPoRddRange,
-            $ibPoHeaderCell,
-            $ibPoRawSheet,
-            $sourceWorkbook,
-            $ibPoSourceWorkbook
-        )) {
-            Release-ComObject -ComObject $comObject
-        }
-        $ibPoPivotForRefresh = $null
-        $ibPoPivotSheetForRefresh = $null
-        $ibPoReplacementSheet = $null
-        $ibPoRddRange = $null
-        $ibPoHeaderCell = $null
-        $ibPoRawSheet = $null
-        $sourceWorkbook = $null
-        $ibPoSourceWorkbook = $null
-    }
-
     $sourceWorkbook = $excel.Workbooks.Open($sourcePath, 0, (-not $sameWorkbook))
     if ($sameWorkbook) {
         $destinationWorkbook = $sourceWorkbook
@@ -1311,13 +927,7 @@ public static class ExcelProcessResolver
     }
     $targetSheet = $destinationWorkbook.Worksheets.Item($DestinationSheetName)
 
-    if (-not $SkipConfirmation) {
-        $confirmationSheet =
-            $sourceWorkbook.Worksheets.Item('CMMR confirmation')
-        $ibPoSheet = $sourceWorkbook.Worksheets.Item('IB PO pvt')
-    }
-
-    if (-not $ConfirmationOnly -and -not $InventoryOnly) {
+    if (-not $InventoryOnly) {
         if (-not $OpenOrdersOnly) {
             $ddrPivotSheet = $sourceWorkbook.Worksheets.Item('DDR pivot')
             $ddrLastRow = Get-LastDataRow -Worksheet $ddrPivotSheet -Column 2
@@ -1349,34 +959,6 @@ public static class ExcelProcessResolver
         $inventoryValues = $inventoryRange.Value2
     }
 
-    if (-not $SkipConfirmation) {
-        $confirmationLastRow = Get-LastDataRow `
-            -Worksheet $confirmationSheet `
-            -Column 24
-        $confirmationRange = $confirmationSheet.Range(
-            "A1:BX$confirmationLastRow"
-        )
-        $confirmationValues = $confirmationRange.Value2
-
-        $ibPoPlantRange = $ibPoSheet.Range('A1:B3')
-        $ibPoPlantValues = $ibPoPlantRange.Value2
-        $ibPoPlant = ''
-        for ($rowIndex = 1; $rowIndex -le 3; $rowIndex++) {
-            if ((Get-NormalizedKey -Value $ibPoPlantValues[$rowIndex, 1]) -eq
-                'PLANT') {
-                $ibPoPlant = Get-NormalizedIdentifier `
-                    -Value $ibPoPlantValues[$rowIndex, 2]
-                break
-            }
-        }
-        if ($ibPoPlant -ne '4815') {
-            throw "IB PO pvt must be filtered for Plant 4815, but found '$ibPoPlant'."
-        }
-        $ibPoPivotTable = $ibPoSheet.PivotTables().Item(1)
-        $ibPoRange = $ibPoPivotTable.TableRange1
-        $ibPoValues = $ibPoRange.Value2
-    }
-
     $targetLastRow = Get-LastDataRow -Worksheet $targetSheet -Column 12
     if ($targetLastRow -lt $targetStartRow) {
         throw "The destination '$DestinationSheetName' sheet has no product rows."
@@ -1386,7 +968,7 @@ public static class ExcelProcessResolver
     )
     $targetProductValues = $targetProductRange.Value2
 
-    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+    if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $columnS = Get-PivotBlockTotals `
             -Values $oorValues `
             -LastRow $oorLastRow `
@@ -1420,7 +1002,7 @@ public static class ExcelProcessResolver
             -LastValueColumn 10 `
             -IncludedSoldTo @('1001089')
     }
-    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $OpenOrdersOnly) {
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
         if (-not $InventoryOnly) {
             $weekly = Get-WeeklyActuals `
                 -Values $ddrValues `
@@ -1433,39 +1015,25 @@ public static class ExcelProcessResolver
                 -LastRow $inventoryLastRow
         }
     }
-    if (-not $ConfirmationOnly -and -not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+    if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $monthly = Get-MonthlyActuals -Values $ddrValues -LastRow $ddrLastRow
     }
-    if (-not $SkipConfirmation) {
-        $ibPoTotals = Get-IbPoConfirmationTotals -Values $ibPoValues
-        $confirmationWeekly = Get-ConfirmationWeeklyBuckets `
-            -Values $confirmationValues `
-            -LastRow $confirmationLastRow `
-            -IbPoTotals $ibPoTotals `
-            -RunDate $AsOfDate
-    }
-
     $targetRowCount = $targetLastRow - $targetStartRow + 1
-    if (-not $SkipConfirmation) {
-        $confirmationOutput = New-Object 'object[,]' $targetRowCount, 4
-    }
-    if (-not $ConfirmationOnly -and -not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+    if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $monthlyOutput = New-Object 'object[,]' $targetRowCount, 3
     }
-    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+    if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         $openOrderOutput = New-Object 'object[,]' $targetRowCount, 4
     }
-    if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $OpenOrdersOnly) {
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
         $stockWeeklyColumnCount = if ($InventoryOnly -or $WeeklyOnly) { 1 } else { 2 }
         $stockWeeklyOutput = New-Object 'object[,]' $targetRowCount, $stockWeeklyColumnCount
     }
 
     for ($outputRow = 0; $outputRow -lt $targetRowCount; $outputRow++) {
-        if (-not $ConfirmationOnly) {
-            $productId = Get-NormalizedKey `
-                -Value $targetProductValues[($outputRow + 1), 1]
-        }
-        if (-not $ConfirmationOnly -and -not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+        $productId = Get-NormalizedKey `
+            -Value $targetProductValues[($outputRow + 1), 1]
+        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
             for ($monthIndex = 0; $monthIndex -lt 3; $monthIndex++) {
                 $monthValue = [double]0
                 if ($monthIndex -lt $monthly.MonthOrder.Count) {
@@ -1477,7 +1045,7 @@ public static class ExcelProcessResolver
                 $monthlyOutput[$outputRow, $monthIndex] = $monthValue
             }
         }
-        if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
             $openOrderOutput[$outputRow, 0] =
                 Get-MapValue -Map $columnS -Key $productId
             $openOrderOutput[$outputRow, 1] =
@@ -1487,7 +1055,7 @@ public static class ExcelProcessResolver
             $openOrderOutput[$outputRow, 3] =
                 Get-MapValue -Map $columnV -Key $productId
         }
-        if (-not $ConfirmationOnly -and -not $MonthlyOnly -and -not $OpenOrdersOnly) {
+        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
             if ($WeeklyOnly) {
                 $stockWeeklyOutput[$outputRow, 0] =
                     Get-MapValue -Map $weekly.Totals -Key $productId
@@ -1500,95 +1068,51 @@ public static class ExcelProcessResolver
                 }
             }
         }
-
-        if (-not $SkipConfirmation) {
-            $confirmationProductId = Get-NormalizedIdentifier `
-                -Value $targetProductValues[($outputRow + 1), 1]
-            for ($weekIndex = 0; $weekIndex -lt 4; $weekIndex++) {
-                $confirmationOutput[$outputRow, $weekIndex] = Get-MapValue `
-                    -Map $confirmationWeekly.WeekMaps[$weekIndex] `
-                    -Key $confirmationProductId
-            }
-        }
     }
 
-    if (-not $ConfirmationOnly) {
-        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
-            $monthlyTarget = $targetSheet.Range(
-                "$($monthlyColumns[0])${targetStartRow}:$($monthlyColumns[1])${targetLastRow}"
-            )
-        }
-        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
-            $openOrderTarget = $targetSheet.Range(
-                "$($openOrderColumns[0])${targetStartRow}:$($openOrderColumns[1])${targetLastRow}"
-            )
-        }
-        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
-            $stockWeeklyTarget = $targetSheet.Range(
-                "$($stockWeeklyColumns[0])${targetStartRow}:$($stockWeeklyColumns[1])${targetLastRow}"
-            )
-        }
+    if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+        $monthlyTarget = $targetSheet.Range(
+            "$($monthlyColumns[0])${targetStartRow}:$($monthlyColumns[1])${targetLastRow}"
+        )
     }
-    if (-not $SkipConfirmation) {
-        $confirmationTarget = $targetSheet.Range(
-            "X${targetStartRow}:AA${targetLastRow}"
+    if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+        $openOrderTarget = $targetSheet.Range(
+            "$($openOrderColumns[0])${targetStartRow}:$($openOrderColumns[1])${targetLastRow}"
         )
-        $futureConfirmationTarget = $targetSheet.Range(
-            "X${targetStartRow}:AA${targetLastRow}"
+    }
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
+        $stockWeeklyTarget = $targetSheet.Range(
+            "$($stockWeeklyColumns[0])${targetStartRow}:$($stockWeeklyColumns[1])${targetLastRow}"
         )
-        $confirmationHeaderTarget = $targetSheet.Range('X3:AA3')
-        $confirmationHeaderOutput = New-Object 'object[,]' 1, 4
-        for ($headerIndex = 0; $headerIndex -lt 4; $headerIndex++) {
-            if ($headerIndex -lt $confirmationWeekly.FutureFridays.Count) {
-                $confirmationHeaderOutput[0, $headerIndex] =
-                    $confirmationWeekly.FutureFridays[$headerIndex].ToOADate()
-            }
-            else {
-                $confirmationHeaderOutput[0, $headerIndex] = $null
-            }
-        }
     }
     $rowRuns = Get-RowVisibilityRuns `
         -Worksheet $targetSheet `
         -StartRow $targetStartRow `
         -EndRow $targetLastRow
 
-    if (-not $ConfirmationOnly) {
-        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
-            Set-RangeValues `
-                -Worksheet $targetSheet `
-                -Range $monthlyTarget `
-                -Values $monthlyOutput `
-                -RowRuns $rowRuns
-            if ($sameWorkbook) {
-                $monthlyTarget.NumberFormat = '#,##0;-#,##0;;@'
-            }
-        }
-        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
-            Set-RangeValues `
-                -Worksheet $targetSheet `
-                -Range $openOrderTarget `
-                -Values $openOrderOutput `
-                -RowRuns $rowRuns
-        }
-    }
-    if (-not $SkipConfirmation) {
+    if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         Set-RangeValues `
             -Worksheet $targetSheet `
-            -Range $confirmationTarget `
-            -Values $confirmationOutput `
+            -Range $monthlyTarget `
+            -Values $monthlyOutput `
             -RowRuns $rowRuns
-        $futureConfirmationTarget.NumberFormat = '#,##0;-#,##0;;@'
-        $confirmationHeaderTarget.Value2 = $confirmationHeaderOutput
-    }
-    if (-not $ConfirmationOnly) {
-        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
-            Set-RangeValues `
-                -Worksheet $targetSheet `
-                -Range $stockWeeklyTarget `
-                -Values $stockWeeklyOutput `
-                -RowRuns $rowRuns
+        if ($sameWorkbook) {
+            $monthlyTarget.NumberFormat = '#,##0;-#,##0;;@'
         }
+    }
+    if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+        Set-RangeValues `
+            -Worksheet $targetSheet `
+            -Range $openOrderTarget `
+            -Values $openOrderOutput `
+            -RowRuns $rowRuns
+    }
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
+        Set-RangeValues `
+            -Worksheet $targetSheet `
+            -Range $stockWeeklyTarget `
+            -Values $stockWeeklyOutput `
+            -RowRuns $rowRuns
     }
 
     Invoke-ExcelComRetry -Context 'restore Automatic calculation before destination save' -Operation {
@@ -1599,41 +1123,27 @@ public static class ExcelProcessResolver
         throw 'Excel calculation mode is not Automatic after saving the destination workbook.'
     }
 
-    if (-not $ConfirmationOnly) {
-        if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
-            Assert-ArrayValues `
-                -Actual $monthlyTarget.Value2 `
-                -Expected $monthlyOutput `
-                -RangeName "$DestinationSheetName $($monthlyColumns -join ':')"
-            if ($sameWorkbook -and
-                $monthlyTarget.NumberFormat -ne '#,##0;-#,##0;;@') {
-                throw 'CMMR monthly quantities must display numeric zero as blank.'
-            }
-        }
-        if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
-            Assert-ArrayValues `
-                -Actual $openOrderTarget.Value2 `
-                -Expected $openOrderOutput `
-                -RangeName "$DestinationSheetName $($openOrderColumns -join ':')"
+    if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
+        Assert-ArrayValues `
+            -Actual $monthlyTarget.Value2 `
+            -Expected $monthlyOutput `
+            -RangeName "$DestinationSheetName $($monthlyColumns -join ':')"
+        if ($sameWorkbook -and
+            $monthlyTarget.NumberFormat -ne '#,##0;-#,##0;;@') {
+            throw 'CMMR monthly quantities must display numeric zero as blank.'
         }
     }
-    if (-not $SkipConfirmation) {
+    if (-not $MonthlyOnly -and -not $InventoryOnly -and -not $WeeklyOnly) {
         Assert-ArrayValues `
-            -Actual $confirmationTarget.Value2 `
-            -Expected $confirmationOutput `
-            -RangeName "$DestinationSheetName X:AA"
-        Assert-ArrayValues `
-            -Actual $confirmationHeaderTarget.Value2 `
-            -Expected $confirmationHeaderOutput `
-            -RangeName "$DestinationSheetName X3:AA3"
+            -Actual $openOrderTarget.Value2 `
+            -Expected $openOrderOutput `
+            -RangeName "$DestinationSheetName $($openOrderColumns -join ':')"
     }
-    if (-not $ConfirmationOnly) {
-        if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
-            Assert-ArrayValues `
-                -Actual $stockWeeklyTarget.Value2 `
-                -Expected $stockWeeklyOutput `
-                -RangeName "$DestinationSheetName $($stockWeeklyColumns -join ':')"
-        }
+    if (-not $MonthlyOnly -and -not $OpenOrdersOnly) {
+        Assert-ArrayValues `
+            -Actual $stockWeeklyTarget.Value2 `
+            -Expected $stockWeeklyOutput `
+            -RangeName "$DestinationSheetName $($stockWeeklyColumns -join ':')"
     }
 
     $refreshSucceeded = $true
@@ -1658,14 +1168,6 @@ finally {
             Write-Warning "Failed to close the source workbook: $($_.Exception.Message)"
         }
     }
-    if ($null -ne $ibPoSourceWorkbook) {
-        try {
-            $ibPoSourceWorkbook.Close($false)
-        }
-        catch {
-            Write-Warning "Failed to close the IB PO source workbook: $($_.Exception.Message)"
-        }
-    }
     if ($null -ne $excel) {
         for ($quitAttempt = 1; $quitAttempt -le 2; $quitAttempt++) {
             try {
@@ -1684,28 +1186,18 @@ finally {
 
     foreach ($comObject in @(
         $stockWeeklyTarget,
-        $confirmationHeaderTarget,
-        $futureConfirmationTarget,
-        $confirmationTarget,
         $openOrderTarget,
         $monthlyTarget,
         $targetProductRange,
-        $ibPoRange,
-        $ibPoPivotTable,
-        $ibPoPlantRange,
-        $confirmationRange,
         $inventoryRange,
         $ddrRange,
         $oorRange,
         $targetSheet,
-        $ibPoSheet,
-        $confirmationSheet,
         $inventorySheet,
         $ddrPivotSheet,
         $oorSheet,
         $destinationWorkbook,
         $sourceWorkbook,
-        $ibPoSourceWorkbook,
         $excel
     )) {
         Release-ComObject -ComObject $comObject
@@ -1734,18 +1226,6 @@ finally {
 }
 
 if ($refreshSucceeded) {
-    if (-not $SkipConfirmation) {
-        $confirmationSummary =
-            $(if ($confirmationWeekly.FutureFridays.Count -gt 0) {
-                'future Fridays: ' +
-                (($confirmationWeekly.FutureFridays | ForEach-Object {
-                    $_.ToString('yyyy-MM-dd')
-                }) -join ', ') + '.'
-            }
-            else {
-                '; no future weeks with AD data.'
-            })
-    }
     if ($WeeklyOnly) {
         Write-Host (
             "CMMR weekly-only $($stockWeeklyColumns[0]) refresh succeeded. " +
@@ -1765,26 +1245,11 @@ if ($refreshSucceeded) {
             "Displayed months: $($monthly.MonthOrder -join ', ')."
         )
     }
-    elseif ($ConfirmationOnly) {
-        Write-Host (
-            'CMMR confirmation X:AA refresh succeeded. ' +
-            "Confirmation buckets: $confirmationSummary"
-        )
-    }
-    elseif ($SkipConfirmation) {
-        Write-Host (
-            'CMMR supportability report refresh succeeded without ' +
-            'confirmation X:AA. ' +
-            "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
-            "$($weekly.EndDate.ToString('yyyy-MM-dd'))."
-        )
-    }
     else {
         Write-Host (
             'CMMR supportability report refresh succeeded. ' +
             "Weekly range: $($weekly.StartDate.ToString('yyyy-MM-dd')) through " +
-            "$($weekly.EndDate.ToString('yyyy-MM-dd')); confirmation buckets: " +
-            $confirmationSummary
+            "$($weekly.EndDate.ToString('yyyy-MM-dd'))."
         )
     }
 }

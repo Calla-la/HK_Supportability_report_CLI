@@ -14,29 +14,20 @@ When the user says "Run CMMR supportability report refresh":
 6. If processing or validation fails, report the exact failure and do not
    report success.
 
-When the user asks to refresh only CMMR confirmation columns `X:AA`, run:
-
-`powershell -ExecutionPolicy Bypass -File .\scripts\Update-CmmrConfirmation.ps1 -SourceWorkbookPath "<source-path>"`
-
-This entry point uses the authoritative CMMR implementation in confirmation-only
-mode. It refreshes the IB PO source data, then updates and validates only
-`CMMR Supportability!X:AA` and `X3:AA3`.
-
-The combined `Update-SupportabilityReports.ps1` entry point invokes the CMMR
-implementation with `-SkipConfirmation`, so it does not read, calculate,
-format, write, or validate `CMMR Supportability!X:AA` or `X3:AA3`.
+CMMR `X:AA` refresh functionality, including its separate entry point and
+IB PO confirmation calculations, has been removed. Neither the individual
+nor the combined supportability refresh updates `X:AA` or `X3:AA3`.
+Preserve all existing values, formulas, headers, and formatting there.
 
 ## Workbooks
 
 For an explicitly requested monthly-only refresh, run the authoritative
 script with `-MonthlyOnly`. This mode reads only `DDR pivot!A:AC` and the
 destination Product IDs, writes and validates only the monthly data range
-(`N:P` in the unified workbook), skips IB PO and confirmation refreshes,
-and does not refresh open orders, inventory, weekly actuals, or Retail.
+(`N:P` in the unified workbook), and does not refresh open orders, inventory,
+weekly actuals, or Retail.
 
 - Source: `1_HK CMMR+RT Order and Supply data CLI.xlsx`
-- IB PO source: `HK ALL IB PO.XLSX`, in the same directory as the source
-  workbook
 - Destination: the source workbook itself
 - Destination worksheet: `CMMR Supportability`
 - Price-list dependency: original `PL 0922` was copied as `CMMR PL` in the
@@ -57,20 +48,6 @@ and does not refresh open orders, inventory, weekly actuals, or Retail.
   Never open a second read-only copy or close/release the same COM workbook
   twice. For separate files, keep the source read-only as before.
 
-## Task 0 - Refresh IB PO source data
-
-Before calculating the supportability report:
-
-1. Open `HK ALL IB PO.XLSX` and use its first worksheet.
-2. Set column `W` header to `IB PO RDD`.
-3. For every populated date in column `P`, write the Friday of that date's
-   Monday-through-Sunday calendar week to column `W`.
-4. Replace the `IB PO` worksheet in the source workbook with the processed
-   worksheet.
-5. Refresh the `IB PO pvt` PivotTable and save the source workbook.
-6. Reopen the source workbook read/write when it is also the destination;
-   otherwise reopen it read-only before running the remaining tasks.
-
 ## Product matching
 
 - Match source `SKU` or `Material` to destination `Product ID` in column `L`.
@@ -83,8 +60,8 @@ Before calculating the supportability report:
 For an explicitly requested open-orders-only update, use
 `-OpenOrdersOnly` with the authoritative CMMR script. This mode writes and
 validates only `R:U` in the unified destination, preserving formatting and
-skipping all other report updates, IB PO, confirmation, and Retail.
-Do not combine it with `-MonthlyOnly` or `-ConfirmationOnly`.
+skipping all other report updates and Retail.
+Do not combine it with another `Only` mode.
 
 Write values to unified destination columns `R:U`:
 
@@ -141,75 +118,18 @@ Write values to unified destination columns `R:U`:
 - On Friday, Saturday, or Sunday, use Monday through Thursday of the current
   calendar week.
 
-## Task 5 - CMMR Confirmation Weekly Buckets
-
-Update destination worksheet `CMMR Supportability`, columns `X:AA`, beginning on
-row 4.
-
-### Source and matching
-
-- Source worksheet: `CMMR confirmation`.
-- Match source `SKU` in column `X` to destination `Product ID` in column `L`.
-- Only include rows where:
-  - Plant in source column `AS` is `4815`.
-  - Sold-to Nbr in source column `C`, ignoring leading zeros, is `5395801`,
-    `5395800`, or `5395799`.
-- Use source column `BX` as `Date to release`.
-- Use source column `AD` as the quantity.
-- For each SKU and BX date, sum AD across all three eligible Sold-to Nbr
-  values.
-
-### Week mapping
-
-Calendar weeks run Monday through Sunday based on the refresh date:
-
-- `X:AA`: the earliest four future calendar weeks that contain eligible AD
-  data, in chronological order.
-- Skip future calendar weeks with no eligible AD data and shift later
-  non-empty weeks left.
-- Write each selected future week's Friday to `X3:AA3`.
-- Clear unused `X3:AA3` cells and write numeric zero to the corresponding
-  unused data columns.
-- Store missing AD results in `X:AA` as numeric zero, but apply a number
-  format that displays zero values as blank.
-
-### IB PO confirmation
-
-Use source worksheet `IB PO pvt` for confirmation:
-
-- Use the PivotTable filtered for Plant `4815`.
-- Match by SKU/Material.
-- Match the BX date to the corresponding `Stat.-Rel. Del. Date`.
-- Compare the PivotTable quantity at the SKU/date intersection with the
-  aggregated AD quantity.
-- Ignore leading zeros when matching numeric identifiers.
-
-For destination columns `X:AA`:
-
-1. Exclude the current calendar week.
-2. For each future calendar week and SKU, sum column `AD` across eligible
-   Sold-to Nbr `5395800`, `5395799`, and `5395801`.
-3. Compare the weekly AD total with the same SKU's `IB PO pvt`
-   `Still to be delivered (qty)` for that week's Friday `IB PO RDD`.
-4. Include the weekly AD total when it is less than or equal to the IB PO
-   quantity; otherwise write numeric zero for that SKU.
-5. Select the earliest four future weeks containing eligible AD data.
-
-Sum all qualifying SKU/date quantities within each week and write numeric
-values to `X:AA`. Write numeric `0` when no qualifying quantity exists.
-
 ## Protection requirements
 
 - Do not change row 1.
-- Only update unified destination cells in columns `N:P`, `R:U`, `X:AA`,
-  and `AK:AL`, beginning on row 4, plus headers `X3:AA3`.
+- Only update unified destination cells in columns `N:P`, `R:U`,
+  and `AK:AL`, beginning on row 4.
+- Do not modify `X:AA`, including headers `X3:AA3`.
 - Preserve `V` and `AM` and all columns to its right; do not clear their
   existing contents or delete columns.
 - Do not modify destination columns `AB:AG`.
 - Write values only and preserve existing formatting.
-- The only formatting exceptions are the `X:AA` and unified destination
-  `N:P` number formats required to display underlying numeric zero values
-  as blank.
+- The only formatting exception is the unified destination `N:P` number
+  format required to display underlying numeric zero values as blank.
 - Do not change any other formulas, values, cell formatting, number formats,
   conditional formatting, column widths, row heights, hidden/grouped state,
   filters, sorting, outlines, freeze panes, PivotTables, charts, shapes,

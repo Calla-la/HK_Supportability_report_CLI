@@ -11,8 +11,6 @@ Automates the CMMR-RT inventory and system confirmation update workflow.
   Supportability refresh requirements
 - `scripts/Update-CmmrSupportability.ps1` — CMMR Supportability refresh
   implementation
-- `scripts/Update-CmmrConfirmation.ps1` — CMMR confirmation-only `X:AA`
-  refresh entry point
 - `.github/instructions/retail-supportability.instructions.md` — Retail and
   combined Supportability refresh requirements
 - `scripts/Update-RetailSupportability.ps1` — Retail Supportability refresh
@@ -55,10 +53,12 @@ The source workbook now also contains the report destinations:
 pointing to that local sheet. The price list is not refreshed by the
 report scripts. The two original report
 workbooks are retained unchanged and are no longer updated by this shortcut.
-Existing calculations, formatting rules, and write ranges are unchanged;
-the combined refresh still skips CMMR confirmation `X:AA` and `X3:AA3`.
+The CMMR `X:AA` refresh entry point and its calculation logic have been
+removed. Both individual and combined supportability refreshes preserve
+existing `X:AA` data, headers, formulas, and formatting. Other report
+calculations, formatting rules, and write ranges are unchanged.
 
-Individual CMMR, Retail, and CMMR confirmation-only entry points also default
+Individual CMMR and Retail entry points also default
 to their respective sheets in the source workbook. Explicit separate
 destination paths remain supported for legacy use and default to the
 original `Supportability` sheet. Individual entry points accept

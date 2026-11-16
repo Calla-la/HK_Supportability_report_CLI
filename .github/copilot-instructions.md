@@ -64,9 +64,8 @@ do not run the refresh unless the user requests execution.
   The former inventory-copy logic is removed. Refresh BB product-row XLOOKUP
   formulas against `Retail INV!J:J`, using INDIRECT so the formulas survive
   inventory-sheet recreation; preserve BB formatting and row 1.
-- Preserve the combined supportability entry point's existing scope: it
-  skips `CMMR Supportability!X:AA` and `X3:AA3`. Do not add the separate
-  confirmation-only script to this shortcut.
+- CMMR `X:AA` refresh functionality has been removed. Preserve existing
+  `CMMR Supportability!X:AA` data, headers, formulas, and formatting.
 - The user manually replaces `HK all OOR` and refreshes `HK OOR Pivot`
   before the combined supportability refresh. Do not automate those steps.
 - Preserve existing report formatting and row 1 formulas, except for changes

@@ -34,10 +34,9 @@ $refreshTry = $ast.EndBlock.Statements | Where-Object {
 } | Select-Object -First 1
 $rangeStatements = @($refreshTry.Body.Statements | Where-Object {
     $_ -is [Management.Automation.Language.IfStatementAst] -and
-    $_.Extent.Text -match '^if \(-not \$ConfirmationOnly\)' -and
-    $_.Extent.Text -match '\$(monthlyTarget|stockWeeklyTarget)'
+    $_.Extent.Text -match '\$(monthlyTarget|openOrderTarget|stockWeeklyTarget)'
 })
-if ($layoutAssignments.Count -ne 3 -or $rangeStatements.Count -ne 5) {
+if ($layoutAssignments.Count -ne 3 -or $rangeStatements.Count -ne 9) {
     throw 'Could not locate the CMMR layout, write, and validation blocks.'
 }
 $configureLayout = [scriptblock]::Create(
@@ -65,7 +64,6 @@ $OpenOrdersOnly = $mode -eq 'OpenOrdersOnly'
 $InventoryOnly = $mode -eq 'InventoryOnly'
 $WeeklyOnly = $mode -eq 'WeeklyOnly'
 foreach ($unified in @($true, $false)) {
-    foreach ($confirmationOnly in @($false, $true)) {
         $sameWorkbook = $unified
         $DestinationSheetName = if ($unified) {
             'CMMR Supportability'
@@ -96,12 +94,6 @@ foreach ($unified in @($true, $false)) {
         . $configureLayout
         . $writeAndValidate
 
-        if ($confirmationOnly) {
-            if ($writes.Count -or $validated.Count -or $targetSheet.Ranges.Count) {
-                throw 'Confirmation-only mode accessed non-confirmation ranges.'
-            }
-            continue
-        }
         $expectedAddresses = if ($unified) {
             @('N4:P5', 'R4:U5', 'AK4:AL5')
         } else { @('O4:Q5', 'S4:V5', 'AM4:AN5') }
@@ -139,7 +131,6 @@ foreach ($unified in @($true, $false)) {
         if (-not $OpenOrdersOnly -and -not $InventoryOnly -and -not $WeeklyOnly -and
             $monthlyTarget.NumberFormat -ne $expectedMonthlyFormat) {
             throw 'Monthly zero-display formatting changed the wrong destination.'
-        }
     }
     }
 }
